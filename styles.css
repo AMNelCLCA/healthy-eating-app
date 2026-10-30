@@ -229,3 +229,97 @@ section[data-slot] > .card { border-left: 5px solid var(--slot-bd); background: 
 .big-kcal { font-size: 28px; font-weight: 700; }
 .ing-row .amt { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 select.input { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23655E7E' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; background-size: 18px; padding-right: 38px; }
+
+/* ===== v1.2: pictures, meals, missing ingredients, week planning ===== */
+:root { --need-bg: #FFE4E1; --need-bd: #E08AA0; --need-ink: #8A1538; }
+
+.tile { --ts: 48px; width: var(--ts); height: var(--ts); border-radius: calc(var(--ts) * .3); display: grid; place-items: center; flex: none; overflow: hidden;
+  background: var(--tb, #E9E2FF); font-size: calc(var(--ts) * .56); line-height: 1; box-shadow: inset 0 0 0 1px rgba(90,70,140,.08);
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; user-select: none; -webkit-user-select: none; }
+.tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.t24 { --ts: 24px; } .t32 { --ts: 32px; } .t36 { --ts: 36px; } .t44 { --ts: 44px; } .t52 { --ts: 52px; } .t72 { --ts: 72px; } .t120 { --ts: 120px; }
+.row.has-tile { gap: 12px; padding-left: 12px; }
+.row.entry { gap: 6px; }
+.sheet .card .row.has-tile { padding-left: 12px; }
+.sv.clamp { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* missing ingredients: warm rose card with a dashed border and a cart line */
+.row.needs { background: var(--need-bg); border: 1.5px dashed var(--need-bd); border-radius: 14px; margin: 4px 6px; width: calc(100% - 12px); padding-right: 6px; }
+.row.needs::before, .row.needs + .row::before { display: none; }
+button.row.needs:active { background: #FFD3CF; }
+.sheet .card .row.needs { background: var(--need-bg); }
+.pickup { display: inline-flex; align-items: flex-start; gap: 5px; font-size: 13px; font-weight: 600; line-height: 1.3; color: var(--need-ink); text-align: left; margin-top: 3px; max-width: 100%; overflow-wrap: anywhere; }
+.pickup svg { width: 14px; height: 14px; flex: none; margin-top: 2px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+button.pickup { min-height: 28px; padding: 3px 0; text-decoration: underline dotted; text-underline-offset: 3px; }
+.row.needs .name, .wk-entry.needs .nm { color: #3B1020; }
+
+/* picture buttons and picker */
+.pic-btn { display: flex; flex-direction: column; align-items: center; gap: 3px; flex: none; border-radius: 22px; }
+.pic-btn:active { opacity: .8; }
+.pic-hint { font-size: 12px; font-weight: 600; color: var(--accent-text); }
+.form-row.pic-row { align-items: center; }
+.form-row.pic-row > .pic-btn { flex: 0 0 auto; }
+.emoji-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.emoji-grid button { height: 48px; border-radius: 12px; background: var(--card-solid); font-size: 26px; line-height: 1; border: 1px solid var(--line); font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+.emoji-grid button:active { background: var(--accent-soft); }
+.btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.detail-top { display: grid; justify-items: center; gap: 6px; text-align: center; }
+.detail-top .chip-row { justify-content: center; }
+.pick-head { display: flex; align-items: center; gap: 12px; }
+.pick-head .grow { min-width: 0; }
+.pick-head .sv { overflow-wrap: anywhere; font-size: 13px; color: var(--muted); }
+
+/* meal editor */
+.mi { background: var(--card-solid); border: 1px solid var(--line); border-radius: 16px; padding: 10px; display: grid; gap: 10px; }
+.mi-top { display: flex; align-items: center; gap: 10px; }
+.mi-top .grow { flex: 1; min-width: 0; }
+.mi-top .name { font-weight: 500; overflow-wrap: anywhere; }
+.mi-top .sv { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.mi-top .kcal { padding-right: 0; }
+.mi .stepper .chip { min-width: 46px; padding: 0 10px; }
+
+/* plan: week title button, week overview */
+.weeknav .range-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 44px; color: var(--accent-text); }
+.weeknav .range-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.wk-sum { display: flex; justify-content: space-between; align-items: baseline; }
+.wk-sum b { font-size: 20px; font-variant-numeric: tabular-nums; }
+.daycard { padding: 4px 12px 6px; }
+.daycard.today { box-shadow: 0 0 0 2px var(--accent), var(--shadow); }
+.dc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 48px; }
+.dc-name { min-height: 44px; display: inline-flex; align-items: baseline; gap: 8px; text-align: left; color: var(--accent-text); }
+.dc-name b { font-size: 19px; font-weight: 800; }
+.dc-name span { font-size: 15px; color: var(--muted); font-weight: 500; }
+.dc-tot { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; }
+.dc-tot.over { color: var(--warn-text); }
+.pill { font-size: 13px; font-weight: 700; padding: 3px 11px; border-radius: 12px; background: var(--slot-bg); color: var(--slot-ink); }
+.wk-empty { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 44px; border-top: .5px solid var(--line); text-align: left; }
+.wk-add { color: var(--accent-text); font-weight: 600; font-size: 14px; padding-right: 4px; }
+.wk-slot { border-top: .5px solid var(--line); padding-bottom: 4px; }
+.wk-hd { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.wk-hd .sp { flex: 1; }
+.wk-hd .icon-btn { width: 40px; height: 40px; }
+.wk-entry { border-radius: 12px; }
+.wk-main { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; min-height: 44px; padding: 3px 2px; }
+.wk-main .nm { flex: 1; min-width: 0; font-weight: 500; font-size: 15.5px; overflow-wrap: anywhere; }
+.wk-main .nm.done { color: var(--muted); text-decoration: line-through; }
+.wk-main .k { font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wk-entry.needs { background: var(--need-bg); border: 1.5px dashed var(--need-bd); padding: 2px 8px 6px; margin: 2px 0; }
+
+/* calendar */
+.cal-head { display: flex; align-items: center; justify-content: space-between; }
+.cal-head b { font-size: 17px; }
+.cal-dow, .cal-week { display: grid; grid-template-columns: repeat(7, 1fr); }
+.cal-dow span { text-align: center; font-size: 12px; font-weight: 700; color: var(--muted); padding: 4px 0; }
+.cal-week { border-radius: 14px; padding: 1px 0; }
+.cal-week.sel { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.cal-day { min-height: 44px; border-radius: 12px; font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cal-day.out { font-weight: 400; color: var(--muted); }
+.cal-day.today { color: var(--accent-text); text-decoration: underline; text-underline-offset: 4px; }
+.cal-day[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); text-decoration: none; }
+.daypick { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+.daypick button { min-height: 58px; border-radius: 14px; background: var(--card-solid); border: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--muted); }
+.daypick button b { font-size: 18px; color: var(--text); text-transform: none; }
+.daypick button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.daypick button[aria-pressed="true"] b { color: var(--accent-ink); }
+.sheet-body { overflow-x: hidden; }
+.pick-list { max-height: 42vh; }

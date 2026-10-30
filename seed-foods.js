@@ -1,4 +1,4 @@
-/* Starter foods and pantry items. Merged once on first launch of v1.1 (and from Settings). */
+/* Starter foods, pantry items and meals. Foods merge once on first launch of v1.1, meals once on first launch of v1.2 (and both from Settings). */
 window.SEED_FOODS = {
  "note": "Amelia's starter foods, 2026-10-30. calories are per the stated serving. components: amount + kcal each; food kcal = sum of components. estimate=true means approximate. pantry = names of pantry items it uses.",
  "pantry": [
@@ -614,3 +614,13 @@ window.SEED_FOODS = {
   }
  ]
 };
+
+/* Starter meals: foods are looked up by exact name; an item whose food is missing is skipped. */
+window.SEED_MEALS = [
+ { "name": "Toast & apple", "items": [
+   { "food": "Sourdough toast with butter spread", "servings": 1 },
+   { "food": "Apple", "servings": 1 } ] },
+ { "name": "Rice & milk", "items": [
+   { "food": "Minute rice with butter spread & salt", "servings": 1 },
+   { "food": "Milk (2%)", "servings": 1 } ] }
+];

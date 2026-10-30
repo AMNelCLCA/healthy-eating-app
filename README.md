@@ -1,15 +1,21 @@
 # Healthy Eating
 
-A personal iPhone home-screen web app (PWA) for planning foods, tracking a pantry, and keeping a calm eye on calories. Plain HTML/CSS/vanilla JS, no build step. Version 1.1.
+A personal iPhone home-screen web app (PWA) for planning foods, tracking a pantry, and keeping a calm eye on calories. Plain HTML/CSS/vanilla JS, no build step. Version 1.2.
 
 ## Features
 
-- **Plan**: a week view with a day picker. Each day has Breakfast, Lunch, Dinner and Snack (peach, mint, lavender, butter-yellow). Add a food with an **amount stepper** (chips ½, 1, 1½, 2, plus −/+ in 0.25 steps). Entries read like `Smoothie · 1½ × 1 smoothie · 689 kcal`. Tick "ate it", set an optional daily goal, copy last week (amounts are kept).
-- **Foods**: a food is a single item ("Banana") or a combo ("Smoothie") with a serving description, calories per serving, an optional estimate flag, notes, linked pantry items, and **ingredients & amounts** (name, amount, kcal, optional pantry link). If every ingredient has kcal, the food's calories are their sum, shown live in the editor. "Can make now" uses the pantry items linked to the food plus those linked from its ingredients.
-- **Find calories**: next to the calories field and each ingredient's kcal field (see below). Saving a food with no calories offers to look them up; otherwise it is saved with "kcal ?" (counted as 0 in totals, and the day shows "N foods without calories").
+- **Menu: Meals and Foods.** The Menu tab has a **Meals | Foods** switch (your last choice is remembered). A **food** is a single item ("Banana", "Smoothie") with a serving, calories, an optional estimate flag, notes, ingredients and linked pantry items. A **meal** is something you compose from foods you often eat together, for example "Toast & apple" = Sourdough toast with butter spread x1 + Apple x1. Each meal line has its own servings stepper (½, 1, 1½, 2 and -/+ in 0.25 steps); the meal's calories are the sum of food calories x servings (a food without calories counts 0 and the meal shows `kcal ?`). Both lists have search and "Can make now". Meal detail shows picture, items, total, status and Edit / Add to plan / Delete. Two starter meals ("Toast & apple", "Rice & milk") are added once on the first v1.2 launch (matched by name, skipped if present).
+- **Missing ingredients.** A food is missing when any linked pantry item (including ingredient links) is marked Out; a meal is missing when any of its foods is. Missing foods, meals and plan entries get a distinct rose card with a dashed border, a cart icon and a line like `Pick up: Milk, Bananas` (long lists show `+2 more`). On the Plan, tapping that line opens Shopping. Out items are already on the Shopping list. Entries you have ticked as eaten are shown normally.
+- **Plan a week.** Tap the week range ("Oct 26 – Nov 1") to open a month calendar; tapping any date picks that Monday-Sunday week (or use This week / Next week). A **Day | Week** switch toggles the existing day view and a week overview: seven day cards, each with four slot rows showing picture, name, kcal, the day total (and vs goal), missing entries in the rose style. Tap an empty slot or the + to add; tap a day name to jump to Day view. The add picker has **Meals | Foods | Custom**, searchable, can-make items first, then the servings stepper (for a meal it multiplies the whole meal) and an optional time. "Add to plan" on a meal or food in the Menu asks for week (this / next / calendar), day and slot. Copy last week keeps meals, foods and amounts.
+- **Pictures.** Every food and meal has a picture: an automatic emoji (keyword map in `emoji.js`; a meal uses its first food's emoji), an emoji you choose from the grid (with keyword search), or a photo. Tap the picture tile in an editor or detail view to change it: "Take or choose photo" (iPhone offers camera or library), an emoji grid, or "Remove photo" (back to the automatic emoji).
+- **Find calories**: next to the calories field and each ingredient's kcal field (see below). Saving a food with no calories offers to look them up; otherwise it is saved with "kcal ?" (counted as 0 in totals, and the day shows "N items without calories").
 - **Pantry / Shopping**: mark items Have or Out; Out items form the shopping list.
-- **Starter foods**: on the first launch of v1.1 your starter pantry and foods (`seed-foods.js`) are merged in without touching existing data. Settings > "Add my starter foods" re-runs the merge (skips names already present).
+- **Starter foods**: foods and pantry items (`seed-foods.js`) are merged on first launch of v1.1, starter meals on first launch of v1.2, without touching existing data. Settings > "Add my starter foods" re-runs both merges (skips names already present).
 - Always a soft pastel light theme, even if the phone is in dark mode.
+
+## Photos: where they are stored
+
+Photos are resized on the device (centre-cropped square, 320 x 320 JPEG, quality 0.8, about 20 to 40 KB) and stored in **IndexedDB** (database `healthyEating`, store `photos`), not in localStorage, so they do not fill its ~5 MB limit. If IndexedDB is unavailable, a photo under 60 KB is kept in localStorage instead; otherwise the app says "Couldn't save photo". A photo is deleted when it is replaced or removed, or when its food or meal is deleted. Backups include photos (see Backup).
 
 ## Find calories: data sources
 
@@ -40,35 +46,35 @@ The app shell is cached by a service worker. When you publish a new version (wit
 
 ## Backup
 
-Everything is stored in this browser's `localStorage` (key `healthyEating.v1`, unchanged across versions). iOS can clear website data for sites you have not used for a long time, and the home-screen app has its own storage separate from Safari, so export a backup regularly.
+Foods, meals, pantry and plans are in this browser's `localStorage` (key `healthyEating.v1`, unchanged across versions); photos are in IndexedDB. iOS can clear website data for sites you have not used for a long time, and the home-screen app has its own storage separate from Safari, so export a backup regularly.
 
-- **Settings > Export backup** saves `healthy-eating-backup-YYYY-MM-DD.json` (iOS share sheet when available, otherwise a download).
-- **Settings > Import backup** validates, shows a summary, and asks before replacing all data. Version 1 backups are migrated on import.
-- When v1 data is migrated, the untouched original is kept once under `healthyEating.v1.preV2`.
+- **Settings > Export backup** saves `healthy-eating-backup-YYYY-MM-DD.json` (iOS share sheet when available, otherwise a download). It includes meals and a `photos` map of dataURLs (about 30 to 40 KB each; Settings shows the approximate size).
+- **Settings > Import backup** validates, shows a summary, and asks before replacing all data and photos. v1 and v2 backups are migrated on import.
+- Before the first migration the untouched originals are kept once: `healthyEating.v1.preV2` (v1 data) and `healthyEating.v1.preV3` (anything older than v3).
 
-## Data model (schemaVersion 2)
+## Data model (schemaVersion 3)
 
 ```
 {
-  schemaVersion: 2,
+  schemaVersion: 3,
   pantry: [{ id, name, category?: string, status: "have" | "out" }],
-  foods:  [{ id, name, serving: string, calories: number | null /* kcal per ONE serving */,
-             estimate: boolean, notes: string,
-             components: [{ id, name, amount: string, calories: number | null, pantryId: string | null }],
-             pantryIds: [pantryId] }],
+  foods:  [{ id, name, serving, calories: number | null /* kcal per ONE serving */, estimate, notes,
+             components: [{ id, name, amount, calories, pantryId }], pantryIds: [pantryId],
+             picture: { type: "emoji", value } | { type: "photo", id } }],
+  meals:  [{ id, name, notes, picture,
+             items: [{ id, foodId, servings } | { id, customName, customCalories, servings } /* left behind by a deleted food */] }],
   weeks:  { "YYYY-MM-DD" /* Monday */: { days: { "YYYY-MM-DD": {
              breakfast|lunch|dinner|snack: [
-               { id, foodId | customName + customCalories, servings: number /* default 1 */,
-                 time?: "HH:MM", eaten: boolean } ] } } } },
-  settings: { dailyGoal: number | null, seededFoodsV1: boolean }
+               { id, kind: "food" | "meal" | "custom", foodId? | mealId? | customName + customCalories,
+                 servings: number, time?: "HH:MM", eaten: boolean } ] } } } },
+  settings: { dailyGoal: number | null, seededFoodsV1: boolean, seededMealsV1: boolean }
 }
 ```
 
-- Food calories = sum of component calories when the food has components and all have numbers; otherwise the manual `calories`.
-- Entry kcal = food kcal x servings, rounded to a whole number (custom entries: customCalories x servings).
-- Migration v1 to v2 (`migrate()` in `app.js`): `meals` become `foods` (`serving: "1 serving"`, `estimate: false`, `components: []`, `pantryIds` from `ingredientIds`), plan entries get `servings: 1` and `mealId` becomes `foodId`.
-- Dates use local time. Deleting a food turns its plan entries into custom entries (amount kept) so history stays intact.
+- Food calories = sum of component calories when all have numbers; otherwise the manual `calories`. Meal calories = sum of food calories x item servings. Entry kcal = (food or meal kcal) x servings, rounded (custom: customCalories x servings).
+- Migration v2 to v3 (in `normalize()`): `meals: []`, every entry gets `kind` (`foodId` becomes food, custom stays custom), every food gets an automatic emoji picture, and `seededMealsV1` is false so the starter meals are added once. v1 data still migrates v1 to v2 to v3.
+- Dates use local time. Deleting a food turns its plan entries and meal lines into custom lines (name, calories and servings kept); deleting a meal turns its plan entries into custom entries.
 
 ## Files
 
-`index.html`, `styles.css`, `app.js`, `seed-foods.js`, `sw.js`, `manifest.webmanifest`, `icon-192.png`, `icon-512.png`, `apple-touch-icon.png`.
+`index.html`, `styles.css`, `app.js`, `seed-foods.js`, `emoji.js`, `sw.js`, `manifest.webmanifest`, `icon-192.png`, `icon-512.png`, `apple-touch-icon.png`.
