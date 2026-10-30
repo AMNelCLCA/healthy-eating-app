@@ -1,12 +1,14 @@
-/* Healthy Eating - vanilla JS PWA. No dependencies, no network. */
+/* Healthy Eating - vanilla JS PWA. No dependencies.
+   The only network use is the optional "Find calories" lookup (Open Food Facts + USDA FoodData Central). */
 (() => {
 'use strict';
 
-const VERSION = '1.0.0';
-const KEY = 'healthyEating.v1';
-const SCHEMA = 1;
+const VERSION = '1.1.0';
+const KEY = 'healthyEating.v1'; // storage key is unchanged so existing data is found and migrated in place
+const SCHEMA = 2;
 const SLOTS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snack', 'Snack']];
 const SLOT_LABEL = Object.fromEntries(SLOTS);
+const LOOKUP_TIMEOUT = 8000;
 
 /* ---------- small utils ---------- */
 const uid = () => (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -24,6 +26,17 @@ const fmt = (n) => numFmt.format(Math.round(n || 0));
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
 const fmtDate = (s, o) => parseYmd(s).toLocaleDateString(undefined, o);
 const fmtTime = (t) => { const [h, m] = t.split(':').map(Number); return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); };
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const round1 = (n) => Math.round(n * 10) / 10;
+const fmtKcal = (k, est) => (k == null ? 'kcal ?' : `${est ? '≈ ' : ''}${fmt(k)} kcal`);
+
+/* 0.25 steps shown as ¼ ½ ¾ */
+function servingsLabel(n) {
+  const q = Math.round(n * 4) / 4;
+  if (Math.abs(q - n) > 1e-9) return String(+n.toFixed(2));
+  const whole = Math.floor(q), frac = { 0: '', 0.25: '¼', 0.5: '½', 0.75: '¾' }[q - whole];
+  return whole > 0 ? `${whole}${frac}` : (frac || '0');
+}
 
 const ICONS = {
   left: '<path d="M14.5 5.5 8 12l6.5 6.5"/>',
@@ -33,6 +46,7 @@ const ICONS = {
   trash: '<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l.8 12.5h9.4L17.5 7M10 11v5M14 11v5"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  minus: '<path d="M5 12h14"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/>',
 };
@@ -67,20 +81,56 @@ const iconBtn = (name, label, onClick, cls = '') => {
   b.append(icon(name)); return b;
 };
 
-/* ---------- state & storage ---------- */
-const blank = () => ({ schemaVersion: SCHEMA, pantry: [], meals: [], weeks: {}, settings: { dailyGoal: null } });
+/* ---------- state, migration & storage ---------- */
+const blank = () => ({ schemaVersion: SCHEMA, pantry: [], foods: [], weeks: {}, settings: { dailyGoal: null, seededFoodsV1: false } });
 let state = blank();
 let storageOk = true;
 let storageNote = '';
 const memStore = {}; // keeps the app usable if localStorage is unavailable
 
-function normalize(raw) {
+function unwrap(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('This is not a Healthy Eating backup.');
-  let src = raw;
-  if (!Array.isArray(src.pantry) && src.data && typeof src.data === 'object') src = src.data;
-  if (typeof src.schemaVersion === 'number' && src.schemaVersion > SCHEMA) throw new Error('This backup was made by a newer version of the app.');
+  if (!Array.isArray(raw.pantry) && raw.data && typeof raw.data === 'object') return raw.data;
+  return raw;
+}
+const schemaOf = (s) => (typeof s.schemaVersion === 'number' ? s.schemaVersion : 1);
+
+/* v1 -> v2: meals become foods (serving "1 serving", no components), plan entries get servings 1 and foodId. Never drops data. */
+function migrate(raw) {
+  const s = unwrap(raw);
+  const v = schemaOf(s);
+  if (v > SCHEMA) throw new Error('This backup was made by a newer version of the app.');
+  if (v >= 2) return s;
+  const out = { ...s, schemaVersion: 2 };
+  if (Array.isArray(s.meals)) {
+    out.foods = s.meals.map((m) => (m && typeof m === 'object'
+      ? { id: m.id, name: m.name, serving: '1 serving', calories: m.calories, estimate: false,
+          notes: typeof m.notes === 'string' ? m.notes : '', components: [], pantryIds: Array.isArray(m.ingredientIds) ? m.ingredientIds : [] }
+      : m));
+  }
+  delete out.meals;
+  const migrateEntry = (e) => { const n = { ...e, servings: 1 }; if ('mealId' in n) { n.foodId = n.mealId; delete n.mealId; } return n; };
+  if (s.weeks && typeof s.weeks === 'object' && !Array.isArray(s.weeks)) {
+    out.weeks = {};
+    for (const [wk, week] of Object.entries(s.weeks)) {
+      if (!week || typeof week !== 'object' || !week.days || typeof week.days !== 'object') { out.weeks[wk] = week; continue; }
+      const days = {};
+      for (const [date, slots] of Object.entries(week.days)) {
+        if (!slots || typeof slots !== 'object') { days[date] = slots; continue; }
+        const ns = {};
+        for (const [slot, list] of Object.entries(slots)) ns[slot] = Array.isArray(list) ? list.map((e) => (e && typeof e === 'object' ? migrateEntry(e) : e)) : list;
+        days[date] = ns;
+      }
+      out.weeks[wk] = { ...week, days };
+    }
+  }
+  return out;
+}
+
+function normalize(raw) {
+  const src = migrate(raw);
   if (!Array.isArray(src.pantry)) throw new Error('The pantry list is missing.');
-  if (!Array.isArray(src.meals)) throw new Error('The meals list is missing.');
+  if (!Array.isArray(src.foods)) throw new Error('The foods list is missing.');
   if (!src.weeks || typeof src.weeks !== 'object' || Array.isArray(src.weeks)) throw new Error('The weekly plan is missing.');
   const out = blank();
   const pantryIds = new Set();
@@ -90,17 +140,29 @@ function normalize(raw) {
     pantryIds.add(id);
     out.pantry.push({ id, name: p.name.trim(), category: typeof p.category === 'string' ? p.category.trim() : '', status: p.status === 'out' ? 'out' : 'have' });
   });
-  const mealIds = new Set();
-  src.meals.forEach((m, i) => {
-    if (!m || typeof m !== 'object' || typeof m.name !== 'string' || !m.name.trim()) throw new Error(`Meal ${i + 1} is not valid.`);
-    const cal = Number(m.calories);
-    if (!Number.isFinite(cal) || cal < 0) throw new Error(`Meal "${m.name}" has invalid calories.`);
-    const id = typeof m.id === 'string' && m.id && !mealIds.has(m.id) ? m.id : uid();
-    mealIds.add(id);
-    const ing = Array.isArray(m.ingredientIds) ? [...new Set(m.ingredientIds.filter((x) => pantryIds.has(x)))] : [];
-    const meal = { id, name: m.name.trim(), calories: cal, ingredientIds: ing };
-    if (typeof m.notes === 'string' && m.notes.trim()) meal.notes = m.notes.trim();
-    out.meals.push(meal);
+  const foodIds = new Set();
+  const calOrNull = (v, label) => {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) throw new Error(`${label} has invalid calories.`);
+    return n;
+  };
+  src.foods.forEach((f, i) => {
+    if (!f || typeof f !== 'object' || typeof f.name !== 'string' || !f.name.trim()) throw new Error(`Food ${i + 1} is not valid.`);
+    const cal = calOrNull(f.calories, `Food "${f.name}"`);
+    const id = typeof f.id === 'string' && f.id && !foodIds.has(f.id) ? f.id : uid();
+    foodIds.add(id);
+    const compIds = new Set();
+    const components = (Array.isArray(f.components) ? f.components : []).map((c, j) => {
+      if (!c || typeof c !== 'object' || typeof c.name !== 'string' || !c.name.trim()) throw new Error(`An ingredient of "${f.name}" is not valid.`);
+      const cid = typeof c.id === 'string' && c.id && !compIds.has(c.id) ? c.id : uid();
+      compIds.add(cid);
+      return { id: cid, name: c.name.trim(), amount: typeof c.amount === 'string' ? c.amount.trim() : '',
+        calories: calOrNull(c.calories, `Ingredient "${c.name}"`), pantryId: typeof c.pantryId === 'string' && pantryIds.has(c.pantryId) ? c.pantryId : null };
+    });
+    out.foods.push({ id, name: f.name.trim(), serving: typeof f.serving === 'string' && f.serving.trim() ? f.serving.trim() : '1 serving',
+      calories: cal, estimate: f.estimate === true, notes: typeof f.notes === 'string' ? f.notes.trim() : '', components,
+      pantryIds: Array.isArray(f.pantryIds) ? [...new Set(f.pantryIds.filter((x) => pantryIds.has(x)))] : [] });
   });
   const entryIds = new Set();
   for (const [wk, week] of Object.entries(src.weeks)) {
@@ -117,12 +179,13 @@ function normalize(raw) {
           if (!e || typeof e !== 'object') throw new Error(`An entry on ${date} is not valid.`);
           const id = typeof e.id === 'string' && e.id && !entryIds.has(e.id) ? e.id : uid();
           entryIds.add(id);
-          const entry = { id, eaten: e.eaten === true };
-          if (typeof e.mealId === 'string' && mealIds.has(e.mealId)) entry.mealId = e.mealId;
+          const sv = Number(e.servings);
+          const entry = { id, eaten: e.eaten === true, servings: Number.isFinite(sv) && sv > 0 ? sv : 1 };
+          if (typeof e.foodId === 'string' && foodIds.has(e.foodId)) entry.foodId = e.foodId;
           else if (typeof e.customName === 'string' && e.customName.trim()) {
             entry.customName = e.customName.trim();
             entry.customCalories = Number.isFinite(Number(e.customCalories)) ? Math.max(0, Number(e.customCalories)) : 0;
-          } else continue; // refers to a meal that does not exist; skip it
+          } else continue; // refers to a food that does not exist; skip it
           if (typeof e.time === 'string' && /^\d{2}:\d{2}$/.test(e.time)) entry.time = e.time;
           const mon = mondayOf(date);
           const w = out.weeks[mon] || (out.weeks[mon] = { days: {} });
@@ -132,8 +195,10 @@ function normalize(raw) {
       }
     }
   }
-  const g = Number(src.settings && src.settings.dailyGoal);
-  out.settings.dailyGoal = src.settings && src.settings.dailyGoal != null && Number.isFinite(g) && g > 0 ? g : null;
+  const st = src.settings && typeof src.settings === 'object' ? src.settings : {};
+  const g = Number(st.dailyGoal);
+  out.settings.dailyGoal = st.dailyGoal != null && Number.isFinite(g) && g > 0 ? g : null;
+  out.settings.seededFoodsV1 = st.seededFoodsV1 === true;
   return out;
 }
 
@@ -147,8 +212,16 @@ function load() {
     raw = memStore[KEY] || null;
   }
   if (!raw) return;
-  try { state = normalize(JSON.parse(raw)); }
-  catch (e) {
+  try {
+    const parsed = JSON.parse(raw);
+    const migrating = schemaOf(unwrap(parsed)) < 2;
+    state = normalize(parsed);
+    if (migrating) {
+      // keep the untouched v1 copy once, then store the migrated data
+      try { if (!localStorage.getItem(KEY + '.preV2')) localStorage.setItem(KEY + '.preV2', raw); } catch (_) { /* ignore */ }
+      save();
+    }
+  } catch (e) {
     storageNote = 'Your saved data could not be read, so the app started empty. The unreadable copy was kept aside.';
     try { localStorage.setItem(KEY + '.unreadable', raw); } catch (_) { /* ignore */ }
     state = blank();
@@ -158,21 +231,37 @@ function save() {
   const json = JSON.stringify(state);
   memStore[KEY] = json;
   try { localStorage.setItem(KEY, json); }
-  catch (e) { storageOk = false; storageNote = 'Storage is full or unavailable, so changes may not be kept. Export a backup from Settings.'; }
+  catch (e) { if (storageOk) storageNote = 'Storage is full or unavailable, so changes may not be kept. Export a backup from Settings.'; storageOk = false; }
 }
 
 /* ---------- selectors ---------- */
 const pantryById = (id) => state.pantry.find((p) => p.id === id);
-const mealById = (id) => state.meals.find((m) => m.id === id);
+const foodById = (id) => state.foods.find((f) => f.id === id);
 const outItems = () => state.pantry.filter((p) => p.status === 'out');
-function mealStatus(m) {
-  const missing = m.ingredientIds.map(pantryById).filter((p) => p && p.status === 'out').map((p) => p.name).sort((a, b) => a.localeCompare(b));
+const findFoodByName = (n) => state.foods.find((f) => f.name.toLowerCase() === n.trim().toLowerCase());
+
+/* calories per ONE serving: sum of components when every component has a number, else the manual value */
+function compsTotal(comps) {
+  if (!comps || !comps.length || comps.some((c) => !isNum(c.calories))) return null;
+  return comps.reduce((a, c) => a + c.calories, 0);
+}
+function foodKcal(f) { const t = compsTotal(f.components); return t != null ? t : (isNum(f.calories) ? f.calories : null); }
+const allPantryIds = (f) => [...new Set([...f.pantryIds, ...f.components.map((c) => c.pantryId).filter(Boolean)])];
+function foodStatus(f) {
+  const missing = allPantryIds(f).map(pantryById).filter((p) => p && p.status === 'out').map((p) => p.name).sort((a, b) => a.localeCompare(b));
   return { ok: missing.length === 0, missing };
 }
-const mealsUsing = (pid) => state.meals.filter((m) => m.ingredientIds.includes(pid)).sort(byName);
+const foodsUsing = (pid) => state.foods.filter((f) => allPantryIds(f).includes(pid)).sort(byName);
+
 function entryInfo(e) {
-  if (e.mealId) { const m = mealById(e.mealId); return { name: m ? m.name : 'Removed meal', cal: m ? m.calories : 0, custom: false }; }
-  return { name: e.customName || 'Something else', cal: e.customCalories || 0, custom: true };
+  const sv = isNum(e.servings) && e.servings > 0 ? e.servings : 1;
+  if (e.foodId) {
+    const f = foodById(e.foodId);
+    if (!f) return { name: 'Removed food', cal: 0, unknown: false, est: false, sv, serving: '', custom: false };
+    const k = foodKcal(f);
+    return { name: f.name, cal: k == null ? 0 : Math.round(k * sv), unknown: k == null, est: f.estimate, sv, serving: f.serving, custom: false };
+  }
+  return { name: e.customName || 'Something else', cal: Math.round((e.customCalories || 0) * sv), unknown: false, est: false, sv, serving: '', custom: true };
 }
 function slotArr(date, slot, create) {
   const wk = mondayOf(date);
@@ -193,9 +282,11 @@ function sortedEntries(date, slot) {
   }).map((x) => x[0]);
 }
 function dayTotals(date) {
-  let planned = 0, eaten = 0;
-  for (const [s] of SLOTS) for (const e of entriesOf(date, s)) { const c = entryInfo(e).cal; planned += c; if (e.eaten) eaten += c; }
-  return { planned, eaten };
+  let planned = 0, eaten = 0, unknown = 0;
+  for (const [s] of SLOTS) for (const e of entriesOf(date, s)) {
+    const i = entryInfo(e); planned += i.cal; if (e.eaten) eaten += i.cal; if (i.unknown) unknown++;
+  }
+  return { planned, eaten, unknown };
 }
 function weekEntryCount(mon) {
   const w = state.weeks[mon]; if (!w) return 0;
@@ -203,7 +294,6 @@ function weekEntryCount(mon) {
   for (const d of Object.values(w.days)) for (const l of Object.values(d)) n += l.length;
   return n;
 }
-const isEmptyApp = () => !state.pantry.length && !state.meals.length && !Object.keys(state.weeks).some((k) => weekEntryCount(k));
 
 function groupByCategory(items) {
   const map = new Map();
@@ -219,7 +309,7 @@ function groupByCategory(items) {
 }
 
 /* ---------- ui state (not persisted) ---------- */
-const ui = { tab: 'plan', week: mondayOf(today()), day: today(), mealQ: '', mealCan: false, pantryQ: '' };
+const ui = { tab: 'plan', week: mondayOf(today()), day: today(), foodQ: '', foodCan: false, pantryQ: '' };
 
 /* ---------- mutations ---------- */
 function commit() { save(); render(); }
@@ -237,15 +327,19 @@ function addPantryItem(name, category, status) {
 const findPantryByName = (n) => state.pantry.find((p) => p.name.toLowerCase() === n.trim().toLowerCase());
 function deletePantryItem(item) {
   state.pantry = state.pantry.filter((p) => p.id !== item.id);
-  state.meals.forEach((m) => { m.ingredientIds = m.ingredientIds.filter((x) => x !== item.id); });
+  state.foods.forEach((f) => {
+    f.pantryIds = f.pantryIds.filter((x) => x !== item.id);
+    f.components.forEach((c) => { if (c.pantryId === item.id) c.pantryId = null; });
+  });
   commit();
 }
-function deleteMeal(meal) {
-  // keep history readable: planned entries become custom entries
+function deleteFood(food) {
+  // keep history readable: planned entries become custom entries (servings kept)
+  const k = foodKcal(food);
   for (const w of Object.values(state.weeks)) for (const d of Object.values(w.days)) for (const l of Object.values(d)) for (const e of l) {
-    if (e.mealId === meal.id) { e.customName = meal.name; e.customCalories = meal.calories; delete e.mealId; }
+    if (e.foodId === food.id) { e.customName = food.name; e.customCalories = k == null ? 0 : k; delete e.foodId; }
   }
-  state.meals = state.meals.filter((m) => m.id !== meal.id);
+  state.foods = state.foods.filter((f) => f.id !== food.id);
   commit();
 }
 function addEntry(date, slot, data, time) {
@@ -260,12 +354,36 @@ function copyLastWeek(target) {
   if (prev) for (const [date, slots] of Object.entries(prev.days)) {
     const nd = addDays(date, 7);
     for (const [slot] of SLOTS) for (const e of slots[slot] || []) {
-      const c = { ...e, id: uid(), eaten: false };
+      const c = { ...e, id: uid(), eaten: false }; // servings are carried over by the spread
       slotArr(nd, slot, true).push(c); n++;
     }
   }
   commit();
   toast(n ? `Copied ${n} ${n === 1 ? 'entry' : 'entries'} from last week` : 'Last week has nothing to copy');
+}
+
+/* ---------- starter foods ---------- */
+function mergeSeed() {
+  const S = window.SEED_FOODS;
+  const res = { pantry: 0, foods: 0 };
+  if (!S) return res;
+  for (const p of S.pantry || []) {
+    if (!p || !p.name || findPantryByName(p.name)) continue;
+    addPantryItem(p.name, p.category || '', 'have'); res.pantry++;
+  }
+  const pid = (name) => { const p = name ? findPantryByName(name) : null; return p ? p.id : null; };
+  for (const f of S.foods || []) {
+    if (!f || !f.name || findFoodByName(f.name)) continue;
+    const components = (f.components || []).map((c) => ({ id: uid(), name: c.name, amount: c.amount || '',
+      calories: isNum(c.calories) ? c.calories : null, pantryId: pid(c.pantry) }));
+    const total = compsTotal(components);
+    state.foods.push({ id: uid(), name: f.name, serving: f.serving || '1 serving',
+      calories: total != null ? total : (isNum(f.calories) ? f.calories : null),
+      estimate: f.estimate === true, notes: f.notes || '', components,
+      pantryIds: [...new Set((f.pantry || []).map(pid).filter(Boolean))] });
+    res.foods++;
+  }
+  return res;
 }
 
 /* ---------- toast ---------- */
@@ -322,6 +440,18 @@ function messageSheet(title, message) {
   const api = openSheet(title, h('p', { style: 'color:var(--muted)' }, message),
     h('button', { class: 'btn', type: 'button', onClick: () => api.close() }, 'OK'));
 }
+/* "Find calories now?" -> 'find' | 'skip' | null (dismissed) */
+function askFindSheet() {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; resolve(v); };
+    const api = openSheet('Find calories now?',
+      h('p', { style: 'color:var(--muted)' }, 'This food has no calories yet. I can look them up, or you can save it now and add them later.'),
+      [h('button', { class: 'btn secondary', type: 'button', onClick: () => { finish('skip'); api.close(); } }, 'Save without'),
+       h('button', { class: 'btn', type: 'button', onClick: () => { finish('find'); api.close(); } }, 'Yes, find')]);
+    api.onClose = () => finish(null);
+  });
+}
 
 /* ---------- shared UI bits ---------- */
 function searchBox(value, placeholder, onInput) {
@@ -337,14 +467,33 @@ function segmented(options, current, onPick) {
     h('button', { type: 'button', 'aria-pressed': String(val === cur), onClick: () => { onPick(val); draw(val); } }, label)));
   draw(current); return wrap;
 }
-function mealFlag(m) {
-  const s = mealStatus(m);
+function foodFlag(f) {
+  const s = foodStatus(f);
   return s.ok ? h('span', { class: 'tag ok' }, 'Can make') : h('span', { class: 'tag warn' }, 'Missing: ' + s.missing.join(', '));
 }
 function storageBanner() {
   return (!storageOk || storageNote) ? h('div', { class: 'warn-banner', role: 'alert' }, storageNote || 'Storage is unavailable.') : null;
 }
 function emptyState(title, text) { return h('div', { class: 'empty card' }, h('strong', null, title), text); }
+
+/* amount stepper: chips plus -/+ in 0.25 steps, min 0.25 */
+function stepper(initial, onChange) {
+  let val = Math.max(0.25, Math.round((initial || 1) * 4) / 4);
+  const out = h('output', { 'aria-live': 'polite', 'aria-label': 'Amount in servings' });
+  const chipsEl = h('div', { class: 'chips', role: 'group', 'aria-label': 'Quick amounts' });
+  const minus = h('button', { type: 'button', 'aria-label': 'Less', onClick: () => set(val - 0.25) }, icon('minus'));
+  const plus = h('button', { type: 'button', 'aria-label': 'More', onClick: () => set(val + 0.25) }, icon('plus'));
+  const quick = [0.5, 1, 1.5, 2];
+  const draw = () => {
+    out.textContent = servingsLabel(val);
+    minus.disabled = val <= 0.25;
+    chipsEl.replaceChildren(...quick.map((q) => h('button', { class: 'chip', type: 'button', 'aria-pressed': String(q === val), onClick: () => set(q) }, servingsLabel(q))));
+  };
+  const set = (v) => { val = Math.min(99, Math.max(0.25, Math.round(v * 4) / 4)); draw(); if (onChange) onChange(val); };
+  draw();
+  const el = h('div', { class: 'stepper' }, chipsEl, h('div', { class: 'step-ctl' }, minus, out, plus));
+  return { el, get: () => val };
+}
 
 /* ---------- PLAN ---------- */
 function viewPlan() {
@@ -358,7 +507,7 @@ function viewPlan() {
   const shift = (n) => { const idx = days.indexOf(ui.day); ui.week = addDays(ui.week, 7 * n); ui.day = addDays(ui.week, idx); render(); };
 
   const root = h('div', { class: 'view' });
-  put(root, 
+  put(root,
     storageBanner(),
     h('header', { class: 'top' }, h('h1', null, 'Plan'),
       h('div', { class: 'top-actions' },
@@ -388,6 +537,7 @@ function viewPlan() {
     h('div', { class: 'stats' },
       h('div', { class: 'stat' }, h('b', { id: 'planned-total' }, fmt(tot.planned)), h('span', null, 'Planned kcal')),
       h('div', { class: 'stat' }, h('b', { id: 'eaten-total' }, fmt(tot.eaten)), h('span', null, 'Eaten kcal'))));
+  if (tot.unknown) summary.append(h('p', { class: 'note-line', id: 'unknown-note' }, `${tot.unknown} ${tot.unknown === 1 ? 'food' : 'foods'} without calories (counted as 0)`));
   if (goal) {
     summary.append(h('div', { class: 'goal' },
       h('div', { class: 'line' }, h('span', null, 'Eaten / goal'), h('b', { id: 'goal-line' }, `${fmt(tot.eaten)} / ${fmt(goal)}`)),
@@ -401,7 +551,7 @@ function viewPlan() {
   for (const [slot, label] of SLOTS) {
     const list = sortedEntries(ui.day, slot);
     const sum = list.reduce((a, e) => a + entryInfo(e).cal, 0);
-    const sec = h('section', { 'aria-label': label });
+    const sec = h('section', { 'aria-label': label, 'data-slot': slot });
     sec.append(h('div', { class: 'slot-head' },
       h('div', { class: 'left' }, h('h2', null, label), list.length ? h('span', { class: 'sub' }, `${fmt(sum)} kcal`) : null),
       h('button', { class: 'pill-btn', type: 'button', 'aria-label': `Add to ${label}`, onClick: () => entrySheet({ date: ui.day, slot }) }, '+ Add')));
@@ -415,12 +565,15 @@ function viewPlan() {
 
 function entryRow(e, date, slot) {
   const info = entryInfo(e);
-  const meta = [`${fmt(info.cal)} kcal`, e.time ? fmtTime(e.time) : null, info.custom ? 'Custom' : null].filter(Boolean).join(' · ');
+  const amount = info.custom
+    ? (info.sv !== 1 ? `${servingsLabel(info.sv)} ×` : null)
+    : `${servingsLabel(info.sv)} × ${info.serving}`;
+  const meta = [amount, info.unknown ? 'kcal ?' : `${info.est ? '≈ ' : ''}${fmt(info.cal)} kcal`, e.time ? fmtTime(e.time) : null, info.custom ? 'Custom' : null].filter(Boolean).join(' · ');
   const check = h('button', { class: 'circle', type: 'button', role: 'checkbox', 'aria-checked': String(e.eaten), 'aria-label': `Ate ${info.name}`,
     onClick: () => { e.eaten = !e.eaten; commit(); } }, h('i', null, icon('check')));
   return h('div', { class: 'row entry' }, check,
     h('div', { class: 'grow' }, h('div', { class: 'name' + (e.eaten ? ' done' : '') }, info.name), h('div', { class: 'meta' }, meta)),
-    iconBtn('swap', `Swap ${info.name}`, () => entrySheet({ date, slot, entry: e })),
+    iconBtn('swap', `Edit ${info.name}`, () => entrySheet({ date, slot, entry: e })),
     iconBtn('trash', `Remove ${info.name}`, () => {
       const list = slotArr(date, slot, false); const idx = list.indexOf(e);
       list.splice(idx, 1); commit();
@@ -439,181 +592,449 @@ function planMenu() {
         if (!ok) return;
       }
       copyLastWeek(ui.week);
-    } }, h('div', { class: 'grow' }, h('div', { class: 'name' }, 'Copy last week’s plan'), h('div', { class: 'meta' }, 'Adds last week’s entries here, with eaten ticks cleared'))),
+    } }, h('div', { class: 'grow' }, h('div', { class: 'name' }, 'Copy last week’s plan'), h('div', { class: 'meta' }, 'Adds last week’s entries here (amounts kept), with eaten ticks cleared'))),
     h('button', { class: 'row', type: 'button', onClick: () => { api.close(); ui.week = mondayOf(today()); ui.day = today(); render(); } },
       h('div', { class: 'grow' }, h('div', { class: 'name' }, 'Jump to today')))));
 }
 
-/* add / swap an entry in a slot */
+/* add / edit an entry in a slot */
 function entrySheet({ date, slot, entry }) {
   const editing = !!entry;
-  let mode = entry && !entry.mealId ? 'custom' : 'meals';
-  let sel = entry && entry.mealId ? entry.mealId : null;
+  let mode = entry && !entry.foodId ? 'custom' : 'foods';
+  let sel = entry && entry.foodId ? entry.foodId : null;
   let q = '';
   const err = h('p', { class: 'err', role: 'alert', hidden: true });
   const showErr = (m) => { err.textContent = m; err.hidden = !m; };
+  const preview = h('div', { class: 'preview', id: 'entry-preview', hidden: true });
+  const step = stepper(entry && entry.servings > 0 ? entry.servings : 1, () => updatePreview());
+
+  const updatePreview = () => {
+    const sv = step.get();
+    let text = '';
+    if (mode === 'foods') {
+      const f = sel ? foodById(sel) : null;
+      if (f) { const k = foodKcal(f); text = `${servingsLabel(sv)} × ${f.serving} = ${k == null ? 'kcal ?' : fmt(k * sv) + ' kcal'}`; }
+    } else {
+      const c = Number(calIn.value);
+      if (calIn.value.trim() !== '' && Number.isFinite(c) && c >= 0) text = `${servingsLabel(sv)} × ${fmt(c)} kcal = ${fmt(c * sv)} kcal`;
+    }
+    preview.textContent = text; preview.hidden = !text;
+  };
 
   const list = h('div', { class: 'card pick-list' });
   const drawList = () => {
     const needle = q.trim().toLowerCase();
-    const ms = state.meals.filter((m) => m.name.toLowerCase().includes(needle)).sort((a, b) => (mealStatus(b).ok - mealStatus(a).ok) || byName(a, b));
-    if (!state.meals.length) { list.replaceChildren(h('div', { class: 'slot-empty' }, 'No meals yet. Use the Custom tab, or add meals in the Meals tab.')); return; }
-    if (!ms.length) { list.replaceChildren(h('div', { class: 'slot-empty' }, 'No meals match.')); return; }
-    list.replaceChildren(...ms.map((m) => h('button', { class: 'row pick-row', type: 'button', role: 'radio', 'aria-checked': String(sel === m.id),
-      onClick: () => { sel = m.id; showErr(''); drawList(); } },
-      h('div', { class: 'grow' }, h('div', { class: 'name' }, m.name), mealFlag(m)),
-      h('span', { class: 'kcal' }, `${fmt(m.calories)} kcal`),
-      h('span', { class: 'circle', style: 'width:32px' }, h('i', { style: sel === m.id ? 'background:var(--accent);border-color:var(--accent);color:var(--accent-ink)' : '' }, icon('check'))))));
+    const fs = state.foods.filter((f) => f.name.toLowerCase().includes(needle)).sort((a, b) => (foodStatus(b).ok - foodStatus(a).ok) || byName(a, b));
+    if (!state.foods.length) { list.replaceChildren(h('div', { class: 'slot-empty' }, 'No foods yet. Use the Custom tab, or add foods in the Foods tab.')); return; }
+    if (!fs.length) { list.replaceChildren(h('div', { class: 'slot-empty' }, 'No foods match.')); return; }
+    list.replaceChildren(...fs.map((f) => h('button', { class: 'row pick-row', type: 'button', role: 'radio', 'aria-checked': String(sel === f.id),
+      onClick: () => { sel = f.id; showErr(''); drawList(); updatePreview(); } },
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, f.name), h('div', { class: 'sv' }, f.serving), foodFlag(f)),
+      h('span', { class: 'kcal' }, fmtKcal(foodKcal(f), f.estimate)),
+      h('span', { class: 'circle', style: 'width:32px' }, h('i', { style: sel === f.id ? 'background:var(--accent);border-color:var(--accent);color:var(--accent-ink)' : '' }, icon('check'))))));
   };
-  const mealsPane = h('div', { class: 'stack' },
-    searchBox('', 'Search meals', (v) => { q = v; drawList(); }), list);
-  const cInfo = entry && !entry.mealId ? entryInfo(entry) : null;
-  const nameIn = textInput({ value: cInfo ? cInfo.name : '', placeholder: 'e.g. Sandwich from the cafe', 'aria-label': 'Custom meal name', autocapitalize: 'sentences' });
-  const calIn = numInput({ value: cInfo ? String(cInfo.cal) : '', placeholder: 'e.g. 450', 'aria-label': 'Custom calories' });
+  const foodsPane = h('div', { class: 'stack' },
+    searchBox('', 'Search foods', (v) => { q = v; drawList(); }), list);
+  const cInfo = entry && !entry.foodId ? { name: entry.customName || '', cal: entry.customCalories || 0 } : null;
+  const nameIn = textInput({ value: cInfo ? cInfo.name : '', placeholder: 'e.g. Sandwich from the cafe', 'aria-label': 'Custom food name', autocapitalize: 'sentences' });
+  const calIn = numInput({ value: cInfo ? String(cInfo.cal) : '', placeholder: 'e.g. 450', 'aria-label': 'Custom calories', onInput: () => updatePreview() });
   const customPane = h('div', { class: 'stack' },
-    field(editing ? 'What I actually had' : 'Name', nameIn), field('Calories', calIn));
+    field(editing ? 'What I actually had' : 'Name', nameIn), field('Calories (for 1 serving)', calIn));
   const timeIn = h('input', { class: 'input', type: 'time', value: entry && entry.time ? entry.time : '', 'aria-label': 'Time (optional)' });
 
   const panes = h('div');
-  const showPane = () => { panes.replaceChildren(mode === 'meals' ? mealsPane : customPane); showErr(''); };
-  const seg = segmented([['meals', 'From meals'], ['custom', 'Custom']], mode, (v) => { mode = v; showPane(); });
+  const showPane = () => { panes.replaceChildren(mode === 'foods' ? foodsPane : customPane); showErr(''); updatePreview(); };
+  const seg = segmented([['foods', 'From foods'], ['custom', 'Custom']], mode, (v) => { mode = v; showPane(); });
   showPane(); drawList();
 
   const save_ = () => {
     let data;
-    if (mode === 'meals') {
-      if (!sel) return showErr('Pick a meal first, or use the Custom tab.');
-      data = { mealId: sel };
+    const servings = step.get();
+    if (mode === 'foods') {
+      if (!sel) return showErr('Pick a food first, or use the Custom tab.');
+      data = { foodId: sel, servings };
     } else {
       const name = nameIn.value.trim(), cal = Number(calIn.value);
       if (!name) return showErr('Please enter a name.');
       if (calIn.value.trim() === '' || !Number.isFinite(cal) || cal < 0) return showErr('Please enter calories (0 or more).');
-      data = { customName: name, customCalories: cal };
+      data = { customName: name, customCalories: cal, servings };
     }
     const time = timeIn.value || '';
     if (editing) {
-      delete entry.mealId; delete entry.customName; delete entry.customCalories;
+      delete entry.foodId; delete entry.customName; delete entry.customCalories;
       Object.assign(entry, data);
       if (time) entry.time = time; else delete entry.time;
     } else addEntry(date, slot, data, time);
     api.close(); commit();
   };
-  const api = openSheet(editing ? 'Swap entry' : `Add to ${SLOT_LABEL[slot]}`,
-    [seg, panes, field('Time (optional)', timeIn), err],
+  const api = openSheet(editing ? 'Edit entry' : `Add to ${SLOT_LABEL[slot]}`,
+    [seg, panes, h('div', { class: 'field' }, h('span', null, 'Amount (servings)'), step.el), preview, field('Time (optional)', timeIn), err],
     h('button', { class: 'btn', type: 'button', onClick: save_ }, editing ? 'Save' : 'Add'));
 }
 
-/* meal -> pick day + slot */
-function addToPlanSheet(meal) {
+/* food -> pick day + slot + amount */
+function addToPlanSheet(food) {
   let date = isDate(ui.day) ? ui.day : today(), slot = 'dinner';
   const dateIn = h('input', { class: 'input', type: 'date', value: date, 'aria-label': 'Day' });
   const timeIn = h('input', { class: 'input', type: 'time', 'aria-label': 'Time (optional)' });
   const err = h('p', { class: 'err', role: 'alert', hidden: true });
   const seg = segmented(SLOTS, slot, (v) => { slot = v; });
+  const preview = h('div', { class: 'preview', id: 'entry-preview' });
+  const upd = () => { const sv = step.get(), k = foodKcal(food); preview.textContent = `${servingsLabel(sv)} × ${food.serving} = ${k == null ? 'kcal ?' : fmt(k * sv) + ' kcal'}`; };
+  const step = stepper(1, upd);
+  upd();
   const go = () => {
     if (!isDate(dateIn.value)) { err.textContent = 'Please choose a day.'; err.hidden = false; return; }
     date = dateIn.value;
-    addEntry(date, slot, { mealId: meal.id }, timeIn.value);
+    addEntry(date, slot, { foodId: food.id, servings: step.get() }, timeIn.value);
     api.close(); save(); render();
     toast(`Added to ${SLOT_LABEL[slot]}, ${fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric' })}`, {
       action: 'View', onAction: () => { ui.tab = 'plan'; ui.week = mondayOf(date); ui.day = date; render(); window.scrollTo(0, 0); } });
   };
   const api = openSheet('Add to plan', [
-    h('p', null, h('strong', null, meal.name), ` · ${fmt(meal.calories)} kcal`),
-    field('Day', dateIn), h('div', { class: 'field' }, h('span', null, 'Meal slot'), seg), field('Time (optional)', timeIn), err],
+    h('p', null, h('strong', null, food.name), ` · ${food.serving} · ${fmtKcal(foodKcal(food), food.estimate)}`),
+    field('Day', dateIn), h('div', { class: 'field' }, h('span', null, 'Meal slot'), seg),
+    h('div', { class: 'field' }, h('span', null, 'Amount (servings)'), step.el), preview,
+    field('Time (optional)', timeIn), err],
     h('button', { class: 'btn', type: 'button', onClick: go }, 'Add to plan'));
 }
 
-/* ---------- MEALS ---------- */
-function viewMeals() {
+/* ---------- FOODS ---------- */
+function viewFoods() {
   const root = h('div', { class: 'view' });
   const list = h('div');
   const draw = () => {
-    const needle = ui.mealQ.trim().toLowerCase();
-    let ms = state.meals.filter((m) => m.name.toLowerCase().includes(needle));
-    if (ui.mealCan) ms = ms.filter((m) => mealStatus(m).ok);
-    ms.sort(byName);
-    if (!state.meals.length) return list.replaceChildren(emptyState('No meals yet', 'Tap + to add your first meal, or load sample data in Settings.'));
-    if (!ms.length) return list.replaceChildren(emptyState(ui.mealCan && !needle ? 'Nothing you can make right now' : 'No matches', ui.mealCan ? 'Check the Shopping tab for what you are out of.' : 'Try a different search.'));
-    list.replaceChildren(h('div', { class: 'card' }, ms.map((m) =>
-      h('button', { class: 'row', type: 'button', onClick: () => mealDetail(m) },
-        h('div', { class: 'grow' }, h('div', { class: 'name' }, m.name), mealFlag(m)),
-        h('span', { class: 'kcal' }, `${fmt(m.calories)} kcal`)))));
+    const needle = ui.foodQ.trim().toLowerCase();
+    let fs = state.foods.filter((f) => f.name.toLowerCase().includes(needle));
+    if (ui.foodCan) fs = fs.filter((f) => foodStatus(f).ok);
+    fs.sort(byName);
+    if (!state.foods.length) return list.replaceChildren(emptyState('No foods yet', 'Tap + to add your first food, or add your starter foods in Settings.'));
+    if (!fs.length) return list.replaceChildren(emptyState(ui.foodCan && !needle ? 'Nothing you can make right now' : 'No matches', ui.foodCan ? 'Check the Shopping tab for what you are out of.' : 'Try a different search.'));
+    list.replaceChildren(h('div', { class: 'card' }, fs.map((f) => {
+      const k = foodKcal(f);
+      return h('button', { class: 'row food-row', type: 'button', onClick: () => foodDetail(f) },
+        h('div', { class: 'grow' }, h('div', { class: 'name' }, f.name), h('div', { class: 'sv' }, f.serving), foodFlag(f)),
+        h('span', { class: 'kcal' + (k == null ? ' unk' : '') }, fmtKcal(k, f.estimate)));
+    })));
   };
-  const chip = h('button', { class: 'chip', type: 'button', 'aria-pressed': String(ui.mealCan), onClick: () => { ui.mealCan = !ui.mealCan; chip.setAttribute('aria-pressed', String(ui.mealCan)); draw(); } }, 'Can make now');
+  const chip = h('button', { class: 'chip', type: 'button', 'aria-pressed': String(ui.foodCan), onClick: () => { ui.foodCan = !ui.foodCan; chip.setAttribute('aria-pressed', String(ui.foodCan)); draw(); } }, 'Can make now');
   put(root, storageBanner(),
-    h('header', { class: 'top' }, h('h1', null, 'Meals'), iconBtn('plus', 'Add meal', () => mealSheet())),
-    searchBox(ui.mealQ, 'Search meals', (v) => { ui.mealQ = v; draw(); }),
+    h('header', { class: 'top' }, h('h1', null, 'Foods'), iconBtn('plus', 'Add food', () => foodSheet())),
+    searchBox(ui.foodQ, 'Search foods', (v) => { ui.foodQ = v; draw(); }),
     h('div', { class: 'chips' }, chip), list);
   draw(); return root;
 }
 
-function mealDetail(meal) {
-  const ings = meal.ingredientIds.map(pantryById).filter(Boolean).sort(byName);
+function foodDetail(food) {
+  const k = foodKcal(food);
+  const pantry = allPantryIds(food).map(pantryById).filter(Boolean).sort(byName);
   const body = [
-    h('div', null, h('div', { style: 'font-size:28px;font-weight:700' }, `${fmt(meal.calories)} kcal`), mealFlag(meal)),
-    h('div', null, h('div', { class: 'group-title', style: 'margin-top:0' }, 'Ingredients'),
-      ings.length ? h('div', { class: 'card' }, ings.map((p) => h('div', { class: 'row' },
+    h('div', null, h('div', { class: 'big-kcal' }, fmtKcal(k, food.estimate)),
+      h('div', { class: 'sv' }, `per ${food.serving}`),
+      h('div', { class: 'chip-row' }, foodFlag(food), food.estimate ? h('span', { class: 'tag est' }, '≈ estimate') : null)),
+    food.components.length ? h('div', null, h('div', { class: 'group-title', style: 'margin-top:0' }, 'Ingredients & amounts'),
+      h('div', { class: 'card' }, food.components.map((c) => h('div', { class: 'row ing-row' },
+        h('div', { class: 'grow' }, h('div', { class: 'name' }, c.name), c.amount ? h('div', { class: 'amt' }, c.amount) : null),
+        h('span', { class: 'kcal' + (c.calories == null ? ' unk' : '') }, c.calories == null ? 'kcal ?' : `${fmt(c.calories)} kcal`))))) : null,
+    h('div', null, h('div', { class: 'group-title', style: 'margin-top:0' }, 'Pantry items'),
+      pantry.length ? h('div', { class: 'card' }, pantry.map((p) => h('div', { class: 'row' },
         h('div', { class: 'grow name' }, p.name), h('span', { class: 'tag ' + (p.status === 'have' ? 'ok' : 'warn'), style: 'margin:0' }, p.status === 'have' ? 'Have' : 'Out'))))
-        : h('p', { class: 'sub' }, 'No linked ingredients.')),
-    meal.notes ? h('div', null, h('div', { class: 'group-title', style: 'margin-top:0' }, 'Notes'), h('p', { style: 'white-space:pre-wrap;overflow-wrap:anywhere' }, meal.notes)) : null,
+        : h('p', { class: 'sub' }, 'No linked pantry items.')),
+    food.notes ? h('div', null, h('div', { class: 'group-title', style: 'margin-top:0' }, 'Notes'), h('p', { style: 'white-space:pre-wrap;overflow-wrap:anywhere' }, food.notes)) : null,
     h('div', { class: 'form-row' },
-      h('button', { class: 'btn secondary', type: 'button', onClick: () => { api.close(); mealSheet(meal); } }, 'Edit'),
+      h('button', { class: 'btn secondary', type: 'button', onClick: () => { api.close(); foodSheet(food); } }, 'Edit'),
       h('button', { class: 'btn danger', type: 'button', onClick: async () => {
-        const ok = await confirmSheet({ title: 'Delete meal?', confirmLabel: 'Delete', danger: true,
-          message: `“${meal.name}” will be removed. Any plan entries using it stay in your plan as custom entries.` });
-        if (ok) { api.close(); deleteMeal(meal); toast('Meal deleted'); }
+        const ok = await confirmSheet({ title: 'Delete food?', confirmLabel: 'Delete', danger: true,
+          message: `“${food.name}” will be removed. Any plan entries using it stay in your plan as custom entries.` });
+        if (ok) { api.close(); deleteFood(food); toast('Food deleted'); }
       } }, 'Delete')),
   ];
-  const api = openSheet(meal.name, body, h('button', { class: 'btn', type: 'button', onClick: () => { api.close(); addToPlanSheet(meal); } }, 'Add to plan'));
+  const api = openSheet(food.name, body, h('button', { class: 'btn', type: 'button', onClick: () => { api.close(); addToPlanSheet(food); } }, 'Add to plan'));
 }
 
-function mealSheet(meal) {
-  const editing = !!meal;
-  const chosen = new Set(meal ? meal.ingredientIds : []);
+function foodSheet(food) {
+  const editing = !!food;
+  const chosen = new Set(food ? food.pantryIds : []);
   let q = '';
-  const nameIn = textInput({ value: meal ? meal.name : '', placeholder: 'e.g. Veggie omelette', 'aria-label': 'Meal name', autocapitalize: 'sentences' });
-  const calIn = numInput({ value: meal ? String(meal.calories) : '', placeholder: 'e.g. 350', 'aria-label': 'Calories' });
-  const notesIn = h('textarea', { class: 'input', placeholder: 'Optional notes or recipe link', 'aria-label': 'Notes', value: meal && meal.notes ? meal.notes : '' });
+  let estimate = food ? food.estimate : false;
+  const nameIn = textInput({ value: food ? food.name : '', placeholder: 'e.g. Banana or Smoothie', 'aria-label': 'Food name', autocapitalize: 'sentences' });
+  const servingIn = textInput({ value: food ? food.serving : '', placeholder: 'e.g. 1 medium, 1 cup cooked, 1 sandwich', 'aria-label': 'Serving description', autocapitalize: 'none' });
+  const calIn = numInput({ value: food && food.calories != null ? String(food.calories) : '', placeholder: 'e.g. 350', 'aria-label': 'Calories per serving' });
+  const notesIn = h('textarea', { class: 'input', placeholder: 'Optional notes or recipe link', 'aria-label': 'Notes', value: food ? food.notes : '' });
   const err = h('p', { class: 'err', role: 'alert', hidden: true });
+  const showErr = (m, el) => { err.textContent = m; err.hidden = !m; if (el) el.focus(); };
+  const setNote = (source) => { if (!notesIn.value.trim()) notesIn.value = `Calories from ${source}.`; };
+
+  /* calories + find */
+  const findCal = h('button', { class: 'btn tonal', type: 'button', 'aria-label': 'Find calories for this food',
+    onClick: () => lookupSheet({ query: nameIn.value, onUse: (r) => {
+      calIn.value = String(r.kcal); if (!servingIn.value.trim()) servingIn.value = r.amountText; setNote(r.source); refresh();
+    } }) }, icon('search'), 'Find calories');
+  const calHint = h('p', { class: 'hint' });
+
+  /* ingredient rows */
+  const rows = [];
+  const compsWrap = h('div', { class: 'stack' });
+  const totalBox = h('div', { class: 'total-line', id: 'comp-total', hidden: true });
+  const rowKcal = (r) => { const v = r.kcalIn.value.trim(); if (v === '') return null; const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : null; };
+  const rowBlank = (r) => !r.nameIn.value.trim() && !r.amtIn.value.trim() && !r.kcalIn.value.trim();
+  function refresh() {
+    const have = rows.filter((r) => !rowBlank(r));
+    const nums = have.map(rowKcal);
+    const auto = have.length > 0 && nums.every((n) => n != null);
+    const sum = nums.reduce((a, n) => a + (n || 0), 0);
+    const missing = nums.filter((n) => n == null).length;
+    totalBox.hidden = !have.length;
+    totalBox.replaceChildren(h('span', null, auto ? 'Total per serving' : `Total so far (${missing} without kcal)`), h('b', null, `${fmt(sum)} kcal`));
+    calIn.disabled = auto;
+    if (auto) calIn.value = String(round1(sum));
+    findCal.hidden = auto;
+    calHint.textContent = auto ? 'Calculated from the ingredients below.' : (have.length ? 'Add kcal to every ingredient to total them automatically, or type the calories here.' : '');
+    calHint.hidden = !calHint.textContent;
+  }
+  function makeRow(c) {
+    const r = { id: c ? c.id : uid() };
+    r.nameIn = textInput({ value: c ? c.name : '', placeholder: 'Ingredient, e.g. Banana', 'aria-label': 'Ingredient name', autocapitalize: 'sentences', onInput: refresh });
+    r.amtIn = textInput({ value: c ? c.amount : '', placeholder: 'Amount, e.g. 2 slices', 'aria-label': 'Ingredient amount', autocapitalize: 'none' });
+    r.kcalIn = numInput({ value: c && c.calories != null ? String(c.calories) : '', placeholder: 'kcal', 'aria-label': 'Ingredient kcal', onInput: refresh });
+    r.sel = h('select', { class: 'input', 'aria-label': 'Linked pantry item' },
+      h('option', { value: '' }, 'Not linked to a pantry item'),
+      state.pantry.slice().sort(byName).map((p) => h('option', { value: p.id }, p.name)));
+    r.sel.value = c && c.pantryId && pantryById(c.pantryId) ? c.pantryId : '';
+    const find = h('button', { class: 'btn tonal', type: 'button', 'aria-label': 'Find calories for this ingredient',
+      onClick: () => lookupSheet({ query: r.nameIn.value, onUse: (x) => {
+        r.kcalIn.value = String(x.kcal); if (!r.amtIn.value.trim()) r.amtIn.value = x.amountText;
+        if (!r.nameIn.value.trim()) r.nameIn.value = x.name;
+        setNote(x.source); refresh();
+      } }) }, icon('search'));
+    r.el = h('div', { class: 'comp' },
+      h('div', { class: 'r1' }, r.nameIn, iconBtn('trash', 'Remove ingredient', () => { rows.splice(rows.indexOf(r), 1); r.el.remove(); refresh(); }, 'muted')),
+      h('div', { class: 'r2' }, r.amtIn, r.kcalIn, find),
+      r.sel);
+    return r;
+  }
+  const addRow = (c) => { const r = makeRow(c); rows.push(r); compsWrap.append(r.el); return r; };
+  (food ? food.components : []).forEach((c) => addRow(c));
+
+  /* linked pantry items */
   const count = h('span', { class: 'sub' });
-  const list = h('div', { class: 'card pick-list' });
+  const plist = h('div', { class: 'card pick-list' });
   const draw = () => {
     const needle = q.trim().toLowerCase();
     const items = state.pantry.filter((p) => p.name.toLowerCase().includes(needle)).sort(byName);
-    const rows = items.map((p) => h('button', { class: 'row pick-row', type: 'button', role: 'checkbox', 'aria-checked': String(chosen.has(p.id)),
+    const prow = items.map((p) => h('button', { class: 'row pick-row', type: 'button', role: 'checkbox', 'aria-checked': String(chosen.has(p.id)),
       onClick: () => { chosen.has(p.id) ? chosen.delete(p.id) : chosen.add(p.id); draw(); } },
       h('div', { class: 'grow' }, h('div', { class: 'name' }, p.name), p.category || p.status === 'out' ? h('div', { class: 'meta' }, [p.category, p.status === 'out' ? 'Out' : null].filter(Boolean).join(' · ')) : null),
       h('span', { class: 'circle', 'aria-hidden': 'true', style: 'width:32px' }, h('i', { style: chosen.has(p.id) ? 'background:var(--accent);border-color:var(--accent);color:var(--accent-ink)' : '' }, icon('check')))));
     const trimmed = q.trim();
     if (trimmed && !findPantryByName(trimmed)) {
-      rows.push(h('button', { class: 'row', type: 'button', style: 'color:var(--accent)', onClick: () => {
+      prow.push(h('button', { class: 'row', type: 'button', style: 'color:var(--accent-text)', onClick: () => {
         const it = addPantryItem(trimmed, '', 'have'); chosen.add(it.id); q = ''; searchInput.value = ''; save(); draw(); render();
-      } }, h('div', { class: 'grow name' }, `+ Add “${trimmed}” as a new ingredient`)));
+      } }, h('div', { class: 'grow name' }, `+ Add “${trimmed}” as a new pantry item`)));
     }
-    if (!rows.length) rows.push(h('div', { class: 'slot-empty' }, 'Your pantry is empty. Type a name above to add an ingredient.'));
-    list.replaceChildren(...rows);
+    if (!prow.length) prow.push(h('div', { class: 'slot-empty' }, 'Your pantry is empty. Type a name above to add an item.'));
+    plist.replaceChildren(...prow);
     count.textContent = `${chosen.size} selected`;
   };
-  const search = searchBox('', 'Search or add ingredients', (v) => { q = v; draw(); });
+  const search = searchBox('', 'Search or add pantry items', (v) => { q = v; draw(); });
   const searchInput = search.querySelector('input');
-  draw();
+  draw(); refresh();
 
-  const submit = () => {
-    const name = nameIn.value.trim(), cal = Number(calIn.value);
-    if (!name) { err.textContent = 'Please enter a meal name.'; err.hidden = false; nameIn.focus(); return; }
-    if (calIn.value.trim() === '' || !Number.isFinite(cal) || cal < 0) { err.textContent = 'Calories are required (a number, 0 or more).'; err.hidden = false; calIn.focus(); return; }
-    const data = { name, calories: cal, ingredientIds: [...chosen].filter(pantryById) };
-    const notes = notesIn.value.trim();
-    if (editing) { Object.assign(meal, data); if (notes) meal.notes = notes; else delete meal.notes; }
-    else { const m = { id: uid(), ...data }; if (notes) m.notes = notes; state.meals.push(m); }
-    api.close(); commit(); toast(editing ? 'Meal saved' : 'Meal added');
+  const estSeg = segmented([['exact', 'Exact'], ['est', '≈ Estimate']], estimate ? 'est' : 'exact', (v) => { estimate = v === 'est'; });
+
+  const submit = async () => {
+    const name = nameIn.value.trim();
+    if (!name) return showErr('Please enter a food name.', nameIn);
+    const serving = servingIn.value.trim() || '1 serving';
+    const comps = [];
+    for (const r of rows) {
+      if (rowBlank(r)) continue;
+      const cn = r.nameIn.value.trim();
+      if (!cn) return showErr('Give each ingredient a name (or remove the empty row).', r.nameIn);
+      const raw = r.kcalIn.value.trim();
+      if (raw !== '' && rowKcal(r) == null) return showErr(`Ingredient “${cn}” needs kcal as a number (0 or more), or leave it empty.`, r.kcalIn);
+      comps.push({ id: r.id, name: cn, amount: r.amtIn.value.trim(), calories: rowKcal(r), pantryId: r.sel.value && pantryById(r.sel.value) ? r.sel.value : null });
+    }
+    const total = compsTotal(comps);
+    let cal;
+    if (total != null) cal = round1(total);
+    else if (calIn.value.trim() === '') cal = null;
+    else {
+      cal = Number(calIn.value);
+      if (!Number.isFinite(cal) || cal < 0) return showErr('Calories must be a number, 0 or more.', calIn);
+    }
+    if (cal == null) {
+      const choice = await askFindSheet();
+      if (choice === null) return; // dismissed: stay in the editor
+      if (choice === 'find') {
+        lookupSheet({ query: name, onUse: (r) => {
+          calIn.value = String(r.kcal); if (!servingIn.value.trim()) servingIn.value = r.amountText; setNote(r.source); refresh(); submit();
+        } });
+        return;
+      }
+    }
+    const data = { name, serving, calories: cal, estimate, notes: notesIn.value.trim(), components: comps, pantryIds: [...chosen].filter(pantryById) };
+    if (editing) Object.assign(food, data); else state.foods.push({ id: uid(), ...data });
+    api.close(); commit(); toast(editing ? 'Food saved' : 'Food added');
   };
-  const api = openSheet(editing ? 'Edit meal' : 'New meal', [
-    field('Name', nameIn), field('Calories', calIn),
-    h('div', { class: 'field' }, h('span', null, 'Ingredients'), h('div', { class: 'stack' }, search, list, count)),
+  const api = openSheet(editing ? 'Edit food' : 'New food', [
+    field('Name', nameIn),
+    field('Serving', servingIn),
+    h('div', { class: 'field' }, h('span', null, 'Calories per serving'), h('div', { class: 'form-row cal-row' }, calIn, findCal), calHint),
+    h('div', { class: 'field' }, h('span', null, 'Accuracy'), estSeg),
+    h('div', { class: 'field' }, h('span', null, 'Ingredients & amounts (optional)'),
+      h('div', { class: 'stack' }, compsWrap, totalBox,
+        h('button', { class: 'btn tonal block', type: 'button', onClick: () => { const r = addRow(); refresh(); r.nameIn.focus(); } }, '+ Add ingredient'))),
+    h('div', { class: 'field' }, h('span', null, 'Linked pantry items (for “Can make”)'), h('div', { class: 'stack' }, search, plist, count)),
     field('Notes', notesIn), err],
     [h('button', { class: 'btn secondary', type: 'button', onClick: () => api.close() }, 'Cancel'), h('button', { class: 'btn', type: 'button', onClick: submit }, 'Save')]);
+}
+
+/* ---------- FIND CALORIES (Open Food Facts + USDA FoodData Central) ---------- */
+async function fetchJson(url) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), LOOKUP_TIMEOUT);
+  try {
+    const res = await fetch(url, { signal: ctl.signal, credentials: 'omit' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  } finally { clearTimeout(timer); }
+}
+const kcalNum = (v) => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : null; };
+const clip = (s, n = 120) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, n);
+function tidy(s) {
+  s = clip(s);
+  return s && s === s.toUpperCase() && /[A-Z]/.test(s) ? s.toLowerCase().replace(/(^|[\s(/-])([a-z])/g, (m, a, b) => a + b.toUpperCase()) : s;
+}
+function gramsOf(label) { const m = /([\d.]+)\s*(g|ml)\b/i.exec(label || ''); return m ? Number(m[1]) : null; }
+
+async function searchOFF(q) {
+  const url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) +
+    '&search_simple=1&action=process&json=1&page_size=12&fields=product_name,brands,serving_size,nutriments';
+  const data = await fetchJson(url);
+  const out = [];
+  for (const p of (data && Array.isArray(data.products) ? data.products : [])) {
+    const name = tidy(p && p.product_name); if (!name) continue;
+    const nut = (p.nutriments && typeof p.nutriments === 'object') ? p.nutriments : {};
+    const ks = kcalNum(nut['energy-kcal_serving']), k100 = kcalNum(nut['energy-kcal_100g']);
+    if (ks == null && k100 == null) continue;
+    const label = clip(p.serving_size, 40);
+    out.push({ source: 'Open Food Facts', sourceKey: 'off', name, brand: clip(String(p.brands || '').split(',')[0], 60),
+      kcalServing: ks, servingLabel: label, kcal100: k100 });
+  }
+  return out;
+}
+function usdaKcal(nutrients) {
+  if (!Array.isArray(nutrients)) return null;
+  const kcal = nutrients.filter((n) => n && String(n.unitName).toUpperCase() === 'KCAL');
+  const pick = kcal.find((n) => n.nutrientName === 'Energy' || String(n.nutrientNumber) === '208') ||
+    kcal.find((n) => ['957', '958'].includes(String(n.nutrientNumber)));
+  return pick ? kcalNum(pick.value) : null;
+}
+async function searchUSDA(q) {
+  const url = 'https://api.nal.usda.gov/fdc/v1/foods/search?api_key=DEMO_KEY&query=' + encodeURIComponent(q) +
+    '&pageSize=12&dataType=Foundation,SR%20Legacy,Survey%20(FNDDS),Branded';
+  const data = await fetchJson(url);
+  const out = [];
+  for (const f of (data && Array.isArray(data.foods) ? data.foods : [])) {
+    const name = tidy(f && f.description); if (!name) continue;
+    const k100 = usdaKcal(f.foodNutrients); if (k100 == null) continue;
+    let ks = null, label = '';
+    const size = Number(f.servingSize), unit = String(f.servingSizeUnit || '').toLowerCase();
+    if (Number.isFinite(size) && size > 0 && /^(g|grm|ml|mlt)$/.test(unit)) { ks = k100 * size / 100; label = `${+size.toFixed(1)} ${unit.startsWith('m') ? 'ml' : 'g'}`; }
+    out.push({ source: 'USDA', sourceKey: 'usda', name, brand: tidy(f.brandName || f.brandOwner || ''), kcalServing: ks, servingLabel: label, kcal100: k100 });
+  }
+  return out;
+}
+function mergeResults(a, b) { // interleave so both sources are visible
+  const out = [];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) { if (b[i]) out.push(b[i]); if (a[i]) out.push(a[i]); }
+  return out;
+}
+
+function lookupSheet({ query, onUse }) {
+  let token = 0, closed = false, results = [], statusMsg = '', statusBad = false, busy = false;
+  const input = h('input', { class: 'input', type: 'search', value: query || '', placeholder: 'Search a food', 'aria-label': 'Search foods for calories', autocomplete: 'off', autocapitalize: 'none', enterkeyhint: 'search' });
+  const form = h('form', { class: 'form-row', onSubmit: (e) => { e.preventDefault(); run(); } },
+    h('div', { class: 'search' }, icon('search'), input), h('button', { class: 'btn', type: 'submit' }, 'Search'));
+  const status = h('p', { class: 'lk-status', role: 'status' });
+  const listEl = h('div', { class: 'card lk-list', id: 'lookup-results', hidden: true });
+  const attrib = h('p', { class: 'attrib' }, 'Data: ',
+    h('a', { href: 'https://world.openfoodfacts.org', target: '_blank', rel: 'noopener noreferrer' }, 'Open Food Facts'), ' (ODbL) · ',
+    h('a', { href: 'https://fdc.nal.usda.gov', target: '_blank', rel: 'noopener noreferrer' }, 'USDA FoodData Central'));
+  const searchView = h('div', { class: 'stack' }, form, status, listEl, attrib);
+  const api = openSheet('Find calories', searchView);
+  api.onClose = () => { closed = true; token++; };
+
+  const basisText = (r) => (r.kcalServing != null ? `per serving${r.servingLabel ? ` (${r.servingLabel})` : ''}` : 'per 100 g');
+  const showResults = () => {
+    status.textContent = statusMsg; status.className = 'lk-status' + (statusBad ? ' bad' : ''); status.hidden = !statusMsg;
+    listEl.hidden = !results.length;
+    listEl.replaceChildren(...results.map((r) => h('button', { class: 'row', type: 'button', onClick: () => showPick(r) },
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, r.name),
+        h('div', { class: 'meta' }, h('span', { class: 'src ' + r.sourceKey }, r.source), r.brand || null)),
+      h('div', { class: 'rt' }, h('span', { class: 'kcal' }, `${fmt(r.kcalServing != null ? r.kcalServing : r.kcal100)} kcal`), h('span', { class: 'sv' }, basisText(r))))));
+    api.body.replaceChildren(searchView);
+  };
+  async function run() {
+    const q = input.value.trim();
+    if (!q) { results = []; statusMsg = 'Type a food to search for.'; statusBad = false; showResults(); return; }
+    const my = ++token; busy = true;
+    results = []; statusMsg = 'Searching…'; statusBad = false; showResults();
+    const [a, b] = await Promise.allSettled([searchOFF(q), searchUSDA(q)]);
+    if (closed || my !== token) return;
+    busy = false;
+    const ra = a.status === 'fulfilled' ? a.value : [], rb = b.status === 'fulfilled' ? b.value : [];
+    results = mergeResults(ra, rb);
+    if (a.status === 'rejected' && b.status === 'rejected') { statusMsg = 'Can’t search right now — are you online?'; statusBad = true; }
+    else if (!results.length) { statusMsg = 'No matches. Try a simpler word, like “yogurt”.'; statusBad = false; }
+    else if (a.status === 'rejected' || b.status === 'rejected') { statusMsg = `${a.status === 'rejected' ? 'Open Food Facts' : 'USDA'} didn’t respond, showing the other source only.`; statusBad = false; }
+    else { statusMsg = ''; statusBad = false; }
+    showResults();
+  }
+
+  function showPick(r) {
+    const hasServ = r.kcalServing != null, has100 = r.kcal100 != null;
+    let mode = hasServ ? 'serving' : 'grams';
+    const amt = numInput({ value: hasServ ? '1' : '100', min: '0', 'aria-label': 'Amount', onInput: () => upd() });
+    const amtLabel = h('span', null);
+    const out = h('div', { class: 'preview', id: 'lookup-kcal' });
+    const useBtn = h('button', { class: 'btn block', type: 'button', id: 'lookup-use' });
+    const calc = () => {
+      const n = Number(amt.value);
+      if (amt.value.trim() === '' || !Number.isFinite(n) || n <= 0) return null;
+      return Math.round(mode === 'serving' ? r.kcalServing * n : r.kcal100 * n / 100);
+    };
+    const upd = () => {
+      amtLabel.textContent = mode === 'serving' ? `Number of servings${r.servingLabel ? ` (1 serving = ${r.servingLabel})` : ''}` : 'Amount in grams';
+      const k = calc();
+      out.textContent = k == null ? 'Enter an amount above 0.' : `${fmt(k)} kcal`;
+      useBtn.textContent = k == null ? 'Use calories' : `Use ${fmt(k)} kcal`;
+      useBtn.disabled = k == null;
+    };
+    useBtn.addEventListener('click', () => {
+      const k = calc(); if (k == null) return;
+      const n = Number(amt.value);
+      const amountText = mode === 'serving'
+        ? (n === 1 ? `1 serving${r.servingLabel ? ` (${r.servingLabel})` : ''}` : `${+n.toFixed(2)} servings`)
+        : `${+n.toFixed(1)} g`;
+      api.close();
+      onUse({ kcal: k, amountText, source: r.sourceKey === 'off' ? 'Open Food Facts' : 'USDA FoodData Central', name: r.name });
+    });
+    const modeSeg = hasServ && has100 ? segmented([['serving', 'Servings'], ['grams', 'Grams']], mode, (v) => { mode = v; amt.value = v === 'serving' ? '1' : '100'; upd(); }) : null;
+    upd();
+    api.body.replaceChildren(h('div', { class: 'stack' },
+      h('button', { class: 'pill-btn', type: 'button', style: 'padding-left:0', onClick: showResults }, '‹ Back to results'),
+      h('div', null, h('div', { class: 'name', style: 'font-weight:600;font-size:18px;overflow-wrap:anywhere' }, r.name),
+        h('div', { class: 'meta sv' }, h('span', { class: 'src ' + r.sourceKey }, r.source), r.brand || null)),
+      h('p', { class: 'sub' }, hasServ ? `${fmt(r.kcalServing)} kcal ${basisText(r)}` : `${fmt(r.kcal100)} kcal per 100 g`),
+      modeSeg,
+      h('label', { class: 'field' }, amtLabel, amt),
+      out, useBtn,
+      h('p', { class: 'attrib' }, 'Values are estimates from public food databases.')));
+  }
+  if ((query || '').trim()) run(); else showResults();
+  setTimeout(() => { if (!closed && !(query || '').trim()) input.focus(); }, 50);
 }
 
 /* ---------- PANTRY ---------- */
@@ -664,7 +1085,7 @@ function pantrySheet(p) {
   const catIn = textInput({ value: p.category || '', placeholder: 'Optional', list: 'cats', 'aria-label': 'Category', autocapitalize: 'words' });
   let status = p.status;
   const err = h('p', { class: 'err', role: 'alert', hidden: true });
-  const used = mealsUsing(p.id);
+  const used = foodsUsing(p.id);
   const submit = () => {
     const name = nameIn.value.trim();
     if (!name) { err.textContent = 'Please enter a name.'; err.hidden = false; return; }
@@ -676,13 +1097,13 @@ function pantrySheet(p) {
   const api = openSheet('Edit item', [
     field('Name', nameIn), field('Category', catIn),
     h('div', { class: 'field' }, h('span', null, 'Status'), segmented([['have', 'Have'], ['out', 'Out']], status, (v) => { status = v; })),
-    h('div', null, h('div', { class: 'group-title', style: 'margin-top:0' }, 'Used in meals'),
+    h('div', null, h('div', { class: 'group-title', style: 'margin-top:0' }, 'Used in foods'),
       used.length ? h('div', { class: 'card' }, used.map((m) => h('div', { class: 'row' }, h('div', { class: 'grow name' }, m.name))))
-        : h('p', { class: 'sub' }, 'Not linked to any meals yet.')),
+        : h('p', { class: 'sub' }, 'Not linked to any foods yet.')),
     err,
     h('button', { class: 'btn danger block', type: 'button', onClick: async () => {
       const ok = await confirmSheet({ title: 'Delete item?', confirmLabel: 'Delete', danger: true,
-        message: used.length ? `“${p.name}” will be removed from your pantry and from ${used.length} ${used.length === 1 ? 'meal' : 'meals'}.` : `“${p.name}” will be removed from your pantry.` });
+        message: used.length ? `“${p.name}” will be removed from your pantry and from ${used.length} ${used.length === 1 ? 'food' : 'foods'}.` : `“${p.name}” will be removed from your pantry.` });
       if (ok) { api.close(); deletePantryItem(p); toast('Item deleted'); }
     } }, 'Delete item')],
     [h('button', { class: 'btn secondary', type: 'button', onClick: () => api.close() }, 'Cancel'), h('button', { class: 'btn', type: 'button', onClick: submit }, 'Save')]);
@@ -747,6 +1168,10 @@ function viewSettings() {
           h('button', { class: 'btn', type: 'submit' }, 'Save goal'),
           h('button', { class: 'btn secondary', type: 'button', onClick: () => { goalIn.value = ''; state.settings.dailyGoal = null; commit(); toast('Goal cleared'); } }, 'Clear')))),
     h('section', { class: 'card pad' },
+      h('h2', { style: 'font-size:17px;margin-bottom:4px' }, 'Starter foods'),
+      h('p', { class: 'setting-desc' }, 'Adds your starter pantry items and foods. Anything already in the app (matched by name) is skipped, so it is safe to tap again.'),
+      h('button', { class: 'btn tonal block', type: 'button', onClick: addStarter }, 'Add my starter foods')),
+    h('section', { class: 'card pad' },
       h('h2', { style: 'font-size:17px;margin-bottom:4px' }, 'Backup'),
       h('p', { class: 'setting-desc' }, 'Your data lives only on this device. Export a copy now and then, and to move to a new phone.'),
       h('div', { class: 'stack' },
@@ -754,37 +1179,24 @@ function viewSettings() {
         h('button', { class: 'btn secondary block', type: 'button', onClick: () => fileIn.click() }, 'Import backup'), fileIn)),
     h('section', { class: 'card pad' },
       h('h2', { style: 'font-size:17px;margin-bottom:4px' }, 'Your data'),
-      h('div', { class: 'stack' },
-        isEmptyApp() ? [h('p', { class: 'setting-desc', style: 'margin:0' }, 'The app is empty. Load a few sample items to try it out.'),
-          h('button', { class: 'btn tonal block', type: 'button', onClick: loadSample }, 'Load sample data')] : null,
-        h('button', { class: 'btn danger block', type: 'button', onClick: eraseAll }, 'Erase all data'))),
+      h('div', { class: 'stack' }, h('button', { class: 'btn danger block', type: 'button', onClick: eraseAll }, 'Erase all data'))),
     h('p', { class: 'about' }, `Healthy Eating v${VERSION}`));
   return root;
 }
 
-function loadSample() {
-  if (!isEmptyApp()) return;
-  const P = (name, category, status = 'have') => ({ id: uid(), name, category, status });
-  const eggs = P('Eggs', 'Dairy & eggs'), yog = P('Greek yogurt', 'Dairy & eggs'), spin = P('Spinach', 'Produce', 'out'),
-    tom = P('Tomatoes', 'Produce'), ban = P('Bananas', 'Produce'), oats = P('Rolled oats', 'Pantry staples'),
-    rice = P('Brown rice', 'Pantry staples'), oil = P('Olive oil', 'Pantry staples'), chick = P('Canned chickpeas', 'Pantry staples'),
-    chicken = P('Chicken breast', 'Protein');
-  state.pantry = [eggs, yog, spin, tom, ban, oats, rice, oil, chick, chicken];
-  const M = (name, calories, ing, notes) => ({ id: uid(), name, calories, ingredientIds: ing.map((x) => x.id), ...(notes ? { notes } : {}) });
-  state.meals = [
-    M('Veggie omelette', 320, [eggs, spin, tom, oil], 'Two eggs, a handful of spinach, sliced tomato.'),
-    M('Overnight oats', 280, [oats, yog, ban]),
-    M('Chicken and rice bowl', 540, [chicken, rice, tom, oil]),
-    M('Chickpea salad', 410, [chick, tom, spin, oil], 'Lemon juice and a pinch of salt.'),
-    M('Banana yogurt', 150, [yog, ban]),
-  ];
-  commit(); toast('Sample data loaded');
+function addStarter() {
+  const r = mergeSeed();
+  state.settings.seededFoodsV1 = true;
+  commit();
+  if (!r.foods && !r.pantry) toast('Everything is already here');
+  else toast(`Added ${r.foods} ${r.foods === 1 ? 'food' : 'foods'} and ${r.pantry} pantry ${r.pantry === 1 ? 'item' : 'items'}`);
 }
 async function eraseAll() {
   const ok = await confirmSheet({ title: 'Erase all data?', confirmLabel: 'Erase everything', danger: true,
-    message: 'This permanently deletes your pantry, meals, plans and settings from this device. Export a backup first if you might want it back.' });
+    message: 'This permanently deletes your pantry, foods, plans and settings from this device. Export a backup first if you might want it back.' });
   if (!ok) return;
-  state = blank(); ui.mealQ = ''; ui.pantryQ = ''; ui.mealCan = false; commit(); toast('All data erased');
+  state = blank(); state.settings.seededFoodsV1 = true; // do not re-add starter foods on next launch
+  ui.foodQ = ''; ui.pantryQ = ''; ui.foodCan = false; commit(); toast('All data erased');
 }
 
 async function exportBackup() {
@@ -811,19 +1223,20 @@ async function importFile(input) {
   let parsed;
   try {
     const text = file.text ? await file.text() : await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsText(file); });
-    parsed = normalize(JSON.parse(text));
+    parsed = normalize(JSON.parse(text)); // v1 backups are migrated here too
   } catch (e) {
     return messageSheet('Can’t import that file', e instanceof SyntaxError ? 'The file is not valid JSON.' : e.message);
   }
-  const entries = Object.keys(parsed.weeks).reduce((a, k) => a + weekEntryCount(k), 0);
+  const entries = Object.keys(parsed.weeks).reduce((a, k) => a + (parsed.weeks[k] ? Object.values(parsed.weeks[k].days).reduce((x, d) => x + Object.values(d).reduce((y, l) => y + l.length, 0), 0) : 0), 0);
   const ok = await confirmSheet({ title: 'Replace all data?', confirmLabel: 'Replace', danger: true,
-    message: `This backup has ${parsed.pantry.length} pantry items, ${parsed.meals.length} meals and ${entries} planned entries. Importing replaces everything currently in the app.` });
+    message: `This backup has ${parsed.pantry.length} pantry items, ${parsed.foods.length} foods and ${entries} planned entries. Importing replaces everything currently in the app.` });
   if (!ok) return;
+  parsed.settings.seededFoodsV1 = true; // an imported backup is what the user wants; do not merge starter foods on top
   state = parsed; ui.week = mondayOf(today()); ui.day = today(); commit(); toast('Backup imported');
 }
 
 /* ---------- shell ---------- */
-const views = { plan: viewPlan, meals: viewMeals, pantry: viewPantry, shopping: viewShopping, settings: viewSettings };
+const views = { plan: viewPlan, foods: viewFoods, pantry: viewPantry, shopping: viewShopping, settings: viewSettings };
 function render() {
   const view = document.getElementById('view');
   view.replaceChildren(views[ui.tab]());
@@ -841,7 +1254,11 @@ document.getElementById('tabbar').addEventListener('click', (e) => {
 });
 
 load();
+let seeded = null;
+if (!state.settings.seededFoodsV1) { seeded = mergeSeed(); state.settings.seededFoodsV1 = true; save(); }
 render();
+if (seeded && seeded.foods) toast(`Added ${seeded.foods} of your foods`);
+else if (seeded && seeded.pantry) toast(`Added ${seeded.pantry} pantry items`);
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* offline support is optional */ }); });
 }
