@@ -721,5 +721,11 @@ window.SEED_BATCHES = [
           { name: "Carrots", amount: "1 medium, shredded", calories: 25, pantry: "Carrots" },
           { name: "Croutons", amount: "½ cup", calories: 65, pantry: "Croutons" }
         ] }
+    ] },
+  { id: "2026-11-21-mandarins",
+    pantry: [ { name: "Mandarin oranges", category: "Produce" } ],
+    foods: [
+      { name: "Mandarin orange", serving: "1 medium (~88 g)", calories: 47, emoji: "🍊",
+        notes: "Fresh mandarin / clementine (Cuties, Halos are similar, about 40 to 47 each).", pantry: ["Mandarin oranges"] }
     ] }
 ];

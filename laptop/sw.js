@@ -1,6 +1,6 @@
 /* Healthy Eating service worker: cache-first app shell.
    Bump VERSION whenever any shell file changes so installed copies update. */
-const VERSION = '1.3.3-laptop';
+const VERSION = '1.3.4-laptop';
 const CACHE = 'healthy-eating-laptop-' + VERSION;
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './seed-foods.js', './emoji.js', './manifest.webmanifest',
