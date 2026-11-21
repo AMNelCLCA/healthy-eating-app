@@ -1,7 +1,7 @@
 /* Healthy Eating service worker: cache-first app shell.
    Bump VERSION whenever any shell file changes so installed copies update. */
-const VERSION = '1.2.1';
-const CACHE = 'healthy-eating-shell-' + VERSION;
+const VERSION = '1.2.1-laptop';
+const CACHE = 'healthy-eating-laptop-' + VERSION;
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './seed-foods.js', './emoji.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './apple-touch-icon.png'
@@ -18,7 +18,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('healthy-eating-shell-') && k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('healthy-eating-laptop-') && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -29,10 +29,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   // Cross-origin requests (food lookup APIs) are never cached: network only.
   if (url.origin !== self.location.origin) return;
-  // The laptop version lives under /laptop/ with its own service worker; leave it alone.
-  if (url.pathname.includes('/laptop/')) return;
   event.respondWith(
-    caches.match(req, { ignoreSearch: true }).then((hit) => {
+    caches.open(CACHE).then((c) => c.match(req, { ignoreSearch: true })).then((hit) => {
       if (hit) return hit;
       return fetch(req).then((res) => {
         if (res && res.ok) {
@@ -40,7 +38,7 @@ self.addEventListener('fetch', (event) => {
           caches.open(CACHE).then((c) => c.put(req, copy));
         }
         return res;
-      }).catch(() => (req.mode === 'navigate' ? caches.match('./index.html') : Response.error()));
+      }).catch(() => (req.mode === 'navigate' ? caches.open(CACHE).then((c) => c.match('./index.html')) : Response.error()));
     })
   );
 });
