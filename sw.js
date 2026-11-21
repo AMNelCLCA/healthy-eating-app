@@ -1,6 +1,6 @@
 /* Healthy Eating service worker: cache-first app shell.
    Bump VERSION whenever any shell file changes so installed copies update. */
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const CACHE = 'healthy-eating-shell-' + VERSION;
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './seed-foods.js', './emoji.js', './manifest.webmanifest',
@@ -29,6 +29,8 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   // Cross-origin requests (food lookup APIs) are never cached: network only.
   if (url.origin !== self.location.origin) return;
+  // The laptop version lives under /laptop/ with its own service worker; leave it alone.
+  if (url.pathname.includes('/laptop/')) return;
   event.respondWith(
     caches.match(req, { ignoreSearch: true }).then((hit) => {
       if (hit) return hit;
