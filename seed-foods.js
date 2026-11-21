@@ -685,3 +685,17 @@ window.SEED_RECIPES_V2 = {
       ] }
   ]
 };
+
+/* 2026-11-21: Amelia's real smoothie recipe. Replaces the earlier guessed "Smoothie" (same food, so plans that use it update too). Applied once via settings.smoothieV3. */
+window.SEED_SMOOTHIE_V3 = {
+  name: "Smoothie", serving: "1 smoothie", estimate: false, emoji: "🥤",
+  notes: "½ banana, 1 Yoplait strawberry yogurt cup, a small branch of broccoli, 3 strawberries, ¼ cup milk.",
+  pantry: ["Bananas", "Yoplait yogurt", "Broccoli", "Frozen strawberries", "Milk"],
+  components: [
+    { name: "Banana", amount: "½ medium", calories: 53, pantry: "Bananas" },
+    { name: "Yoplait Original strawberry yogurt", amount: "1 cup (6 oz)", calories: 140, pantry: "Yoplait yogurt" },
+    { name: "Broccoli", amount: "1 small branch (~30 g)", calories: 10, pantry: "Broccoli" },
+    { name: "Strawberries", amount: "3 strawberries", calories: 12, pantry: "Frozen strawberries" },
+    { name: "Milk (2%)", amount: "¼ cup", calories: 31, pantry: "Milk" }
+  ]
+};
