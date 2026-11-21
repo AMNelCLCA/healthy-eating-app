@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.3.1';
+const VERSION = '1.4.0';
 const KEY = 'healthyEating.v1'; // storage key is unchanged so existing data is found and migrated in place
 const SCHEMA = 4;
 const SLOTS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner']]; // snacks are logged, not planned (state.snackLog)
@@ -1105,7 +1105,11 @@ function planMenu() {
       copyLastWeek(ui.week);
     } }, h('div', { class: 'grow' }, h('div', { class: 'name' }, 'Copy last week’s plan'), h('div', { class: 'meta' }, 'Adds last week’s entries here (amounts kept), with eaten ticks cleared'))),
     h('button', { class: 'row', type: 'button', onClick: () => { api.close(); ui.week = mondayOf(today()); ui.day = today(); render(); } },
-      h('div', { class: 'grow' }, h('div', { class: 'name' }, 'Jump to today')))));
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, 'Jump to today'))),
+    h('button', { class: 'row', type: 'button', id: 'menu-share-week', onClick: () => { api.close(); shareWeekSheet(); } },
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, 'Share this week…'), h('div', { class: 'meta' }, 'Send this week’s plan to another device as a file or text'))),
+    h('button', { class: 'row', type: 'button', id: 'menu-open-shared', onClick: () => { api.close(); openSharedSheet(); } },
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, 'Open a shared week…'), h('div', { class: 'meta' }, 'Add a week you shared from your other device')))));
 }
 
 /* month calendar; tapping any date picks the Monday-Sunday week it belongs to (the whole week row is highlighted) */
@@ -2062,6 +2066,10 @@ function viewSettings() {
       h('div', { class: 'stack' },
         h('button', { class: 'btn secondary block', type: 'button', onClick: exportBackup }, 'Export backup'),
         h('button', { class: 'btn secondary block', type: 'button', onClick: () => fileIn.click() }, 'Import backup'), fileIn)),
+    h('section', { class: 'card pad', id: 'moving-data' },
+      h('h2', { style: 'font-size:17px;margin-bottom:4px' }, 'Moving data between phone and laptop'),
+      h('p', { class: 'setting-desc' }, 'Each device keeps its own data, and the home-screen app is separate from Safari. To move just one week’s plan, use Plan → ⋯ → Share this week… on one device and Open a shared week… on the other (AirDrop, Mail or Messages a file, or copy and paste text). Foods, meals and pantry items you already have are never overwritten.'),
+      h('p', { class: 'setting-desc' }, 'To copy everything (all foods, meals, pantry, plans, snack log and photos) or to move to a new device, use Export backup and Import backup above. Importing a backup replaces everything on that device.')),
     h('section', { class: 'card pad' },
       h('h2', { style: 'font-size:17px;margin-bottom:4px' }, 'Your data'),
       h('div', { class: 'stack' }, h('button', { class: 'btn danger block', type: 'button', onClick: eraseAll }, 'Erase all data'))),
@@ -2093,6 +2101,349 @@ async function eraseAll() {
   await photoClearAll();
   state = blank(); state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; state.settings.seededRecipesV2 = true; state.settings.smoothieV3 = true; state.settings.snackNamesV4 = true; state.settings.appliedBatches = allBatchIds(); // do not re-add starter foods on next launch
   ui.menuQ = ''; ui.pantryQ = ''; ui.menuCan = false; commit(); toast('All data erased');
+}
+
+/* ---------- share a week between devices (file or pasted code) ---------- */
+const SHARE_APP = 'healthy-eating', SHARE_TYPE = 'week-plan', SHARE_VERSION = 1, SHARE_PREFIX = 'HEWEEK1:';
+const SHARE_FROM = /laptop/i.test(VERSION) ? 'laptop' : 'phone';
+const SHARE_LIMITS = { entries: 700, foods: 600, meals: 300, pantry: 800, comps: 60, items: 60, str: 120, notes: 3000, bytes: 4 * 1024 * 1024 };
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+function b64urlEncode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64urlDecode(s) {
+  const b = s.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b + '==='.slice((b.length + 3) % 4));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+}
+
+/* the viewed week -> a self-contained package (foods, meals and pantry referenced by name; eaten ticks and photos are not shared) */
+function buildWeekPackage(mon) {
+  const days = {}, foodIds = new Set(), mealIds = new Set();
+  let count = 0;
+  for (let i = 0; i < 7; i++) {
+    const date = addDays(mon, i), out = {};
+    for (const [slot] of SLOTS) {
+      const list = [];
+      for (const e of sortedEntries(date, slot)) {
+        const kind = entryKind(e), o = { kind, servings: isNum(e.servings) && e.servings > 0 ? e.servings : 1 };
+        if (kind === 'meal') { const m = mealById(e.mealId); if (!m) continue; o.name = m.name; mealIds.add(m.id); }
+        else if (kind === 'food') { const f = foodById(e.foodId); if (!f) continue; o.name = f.name; foodIds.add(f.id); }
+        else { o.name = e.customName || 'Something else'; o.calories = isNum(e.customCalories) ? e.customCalories : 0; }
+        if (e.time) o.time = e.time;
+        list.push(o); count++;
+      }
+      if (list.length) out[slot] = list;
+    }
+    if (Object.keys(out).length) days[date] = out;
+  }
+  const meals = [...mealIds].map(mealById);
+  meals.forEach((m) => m.items.forEach((it) => { if (it.foodId && foodById(it.foodId)) foodIds.add(it.foodId); }));
+  const foods = [...foodIds].map(foodById);
+  const pantryIds = new Set();
+  const pkg = {
+    app: SHARE_APP, type: SHARE_TYPE, version: SHARE_VERSION, weekStart: mon, sharedAt: new Date().toISOString(), from: SHARE_FROM, days,
+    foods: foods.map((f) => {
+      allPantryIds(f).forEach((id) => pantryIds.add(id));
+      const o = { name: f.name, serving: f.serving, calories: isNum(f.calories) ? f.calories : null, estimate: !!f.estimate, snack: !!f.snack, notes: f.notes || '',
+        components: f.components.map((c) => ({ name: c.name, amount: c.amount || '', calories: isNum(c.calories) ? c.calories : null, pantryName: (pantryById(c.pantryId) || {}).name || null })),
+        pantryNames: f.pantryIds.map((id) => (pantryById(id) || {}).name).filter(Boolean) };
+      if (f.picture && f.picture.type === 'emoji') o.emoji = f.picture.value;
+      return o;
+    }),
+    meals: meals.map((m) => {
+      const o = { name: m.name, notes: m.notes || '', items: m.items.map((it) => {
+        const f = it.foodId ? foodById(it.foodId) : null, sv = isNum(it.servings) && it.servings > 0 ? it.servings : 1;
+        return f ? { foodName: f.name, servings: sv } : { customName: it.customName || '(deleted food)', customCalories: isNum(it.customCalories) ? it.customCalories : 0, servings: sv };
+      }) };
+      if (m.picture && m.picture.type === 'emoji') o.emoji = m.picture.value;
+      return o;
+    }),
+    pantry: [...pantryIds].map(pantryById).filter(Boolean).map((p) => ({ name: p.name, category: p.category || '' }))
+  };
+  return { pkg, count };
+}
+
+/* text (file contents, pasted JSON or a HEWEEK1: code) -> a validated, cleaned package. Throws Error with a friendly message. */
+function parseSharedText(text) {
+  let t = String(text == null ? '' : text).replace(/^﻿/, '').trim();
+  if (!t) throw new Error('There is nothing to read yet. Choose a file or paste the shared text.');
+  if (t.length > SHARE_LIMITS.bytes * 1.4) throw new Error('That is far too large to be a shared week.');
+  let obj;
+  const code = /^\s*HEWEEK1:/i.test(t);
+  if (code) {
+    try { obj = JSON.parse(b64urlDecode(t.replace(/^\s*HEWEEK1:/i, '').replace(/\s+/g, ''))); }
+    catch (e) { throw new Error('That code looks incomplete or damaged. Copy the whole text again, including the HEWEEK1: start.'); }
+  } else {
+    try { obj = JSON.parse(t); }
+    catch (e) { throw new Error('That is not a shared week. It should be a .json file from "Share this week", or text starting with HEWEEK1:.'); }
+  }
+  return validateShared(obj);
+}
+function validateShared(o) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) throw new Error('That is not a shared week from Healthy Eating.');
+  if (o.app !== SHARE_APP && Array.isArray(o.pantry) && (Array.isArray(o.foods) || o.schemaVersion != null || (o.data && typeof o.data === 'object'))) {
+    throw new Error('This is a full backup, not a shared week. Use Settings → Import backup instead.');
+  }
+  if (o.app === SHARE_APP && o.type !== SHARE_TYPE) {
+    if (o.schemaVersion != null || o.type === 'backup') throw new Error('This is a full backup, not a shared week. Use Settings → Import backup instead.');
+    throw new Error('That file is from Healthy Eating but it is not a shared week.');
+  }
+  if (o.app !== SHARE_APP || o.type !== SHARE_TYPE) throw new Error('That is not a shared week from Healthy Eating.');
+  if (o.version !== SHARE_VERSION) throw new Error(isNum(o.version) && o.version > SHARE_VERSION ? 'This week was shared by a newer version of the app. Update this app and try again.' : 'This shared week has an unknown version.');
+  const L = SHARE_LIMITS, bad = (m) => { throw new Error(`This shared week is not valid (${m}).`); };
+  const str = (v, max, what, req) => {
+    if (v == null || v === '') { if (req) bad(`${what} is missing`); return ''; }
+    if (typeof v !== 'string') bad(`${what} is not text`);
+    const s = v.trim();
+    if (req && !s) bad(`${what} is missing`);
+    if (s.length > max) bad(`${what} is too long`);
+    return s;
+  };
+  const num = (v, what, { min = 0, max = 100000, nullable = false } = {}) => {
+    if ((v == null || v === '') && nullable) return null;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max) bad(`${what} is not a valid number`);
+    return v;
+  };
+  const arr = (v, max, what) => { if (v == null) return []; if (!Array.isArray(v)) bad(`${what} is not a list`); if (v.length > max) bad(`too many ${what}`); return v; };
+  if (!isDate(o.weekStart)) bad('the week date is missing');
+  const weekStart = mondayOf(o.weekStart);
+  const rec = (v, what) => { if (!v || typeof v !== 'object' || Array.isArray(v)) bad(`${what} is not valid`); return v; };
+
+  const pantry = arr(o.pantry, L.pantry, 'pantry items').map((p) => ({ name: str(rec(p, 'a pantry item').name, L.str, 'a pantry name', true), category: str(p.category, L.str, 'a pantry category') }));
+  const foods = arr(o.foods, L.foods, 'foods').map((f) => {
+    rec(f, 'a food');
+    const name = str(f.name, L.str, 'a food name', true);
+    return { name, serving: str(f.serving, L.str, 'a serving') || '1 serving', calories: num(f.calories, `${name} calories`, { nullable: true }), estimate: f.estimate === true, snack: f.snack === true,
+      notes: str(f.notes, L.notes, 'notes'), emoji: str(f.emoji, 16, 'an emoji') || null,
+      components: arr(f.components, L.comps, 'ingredients').map((c) => ({ name: str(rec(c, 'an ingredient').name, L.str, 'an ingredient name', true), amount: str(c.amount, L.str, 'an amount'),
+        calories: num(c.calories, `${name} ingredient calories`, { nullable: true }), pantryName: str(c.pantryName, L.str, 'a pantry name') || null })),
+      pantryNames: arr(f.pantryNames, L.comps, 'pantry links').map((n) => str(n, L.str, 'a pantry name', true)) };
+  });
+  const meals = arr(o.meals, L.meals, 'meals').map((m) => {
+    rec(m, 'a meal');
+    const name = str(m.name, L.str, 'a meal name', true);
+    return { name, notes: str(m.notes, L.notes, 'notes'), emoji: str(m.emoji, 16, 'an emoji') || null,
+      items: arr(m.items, L.items, 'meal items').map((it) => {
+        rec(it, 'a meal item');
+        const servings = num(it.servings == null ? 1 : it.servings, `${name} servings`, { min: 0.0001, max: 99 });
+        if (it.foodName != null) return { foodName: str(it.foodName, L.str, 'a food name', true), servings };
+        return { customName: str(it.customName, L.str, 'a food name', true), customCalories: num(it.customCalories == null ? 0 : it.customCalories, 'calories'), servings };
+      }) };
+  });
+  const foodNames = new Set(foods.map((f) => f.name.toLowerCase())), mealNames = new Set(meals.map((m) => m.name.toLowerCase()));
+  const days = {}, daySrc = rec(o.days || {}, 'the days');
+  let count = 0;
+  for (const [date, slots] of Object.entries(daySrc)) {
+    if (!isDate(date)) bad('a date is not valid');
+    const diff = Math.round((parseYmd(date) - parseYmd(weekStart)) / 864e5);
+    if (diff < 0 || diff > 6) bad('a date falls outside the week');
+    rec(slots, 'a day');
+    const out = {};
+    for (const [slot] of SLOTS) {
+      const list = arr(slots[slot], L.entries, 'entries');
+      out[slot] = list.map((e) => {
+        rec(e, 'an entry');
+        const kind = e.kind, name = str(e.name, L.str, 'an entry name', true);
+        const r = { kind, name, servings: num(e.servings == null ? 1 : e.servings, `${name} servings`, { min: 0.0001, max: 99 }) };
+        if (kind === 'food') { if (!foodNames.has(name.toLowerCase())) bad(`"${name}" is not included in the file`); }
+        else if (kind === 'meal') { if (!mealNames.has(name.toLowerCase())) bad(`"${name}" is not included in the file`); }
+        else if (kind === 'custom') r.calories = num(e.calories == null ? 0 : e.calories, `${name} calories`);
+        else bad('an entry has an unknown type');
+        if (e.time != null) { if (typeof e.time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(e.time)) bad('a time is not valid'); r.time = e.time; }
+        count++;
+        return r;
+      });
+    }
+    days[date] = out;
+  }
+  if (count > L.entries) bad('too many entries');
+  return { weekStart, sharedAt: typeof o.sharedAt === 'string' ? o.sharedAt.slice(0, 40) : '', from: o.from === 'laptop' || o.from === 'phone' ? o.from : '', days, foods, meals, pantry, count };
+}
+
+/* what would be added, counted against what this device already has (matched by name, case-insensitive) */
+function sharedNewCounts(pkg) {
+  return { foods: pkg.foods.filter((f) => !findFoodByName(f.name)).length, meals: pkg.meals.filter((m) => !findMealByName(m.name)).length,
+    pantry: pkg.pantry.filter((p) => !findPantryByName(p.name)).length };
+}
+function sharedPreviewText(pkg) {
+  const n = sharedNewCounts(pkg), parts = [];
+  if (n.foods) parts.push(plural(n.foods, 'new food', 'new foods'));
+  if (n.meals) parts.push(plural(n.meals, 'new meal', 'new meals'));
+  if (n.pantry) parts.push(plural(n.pantry, 'new pantry item', 'new pantry items'));
+  return `Week of ${weekRange(pkg.weekStart)} · ${plural(pkg.count, 'entry', 'entries')} · ` + (parts.length ? `${parts.join(', ')} will be added` : 'nothing new needed in your foods, meals or pantry');
+}
+
+/* merge a validated package into the plan. Existing foods/meals/pantry are matched by name and never overwritten. Returns the number of entries added. */
+function applySharedWeek(pkg, targetMon, mode) {
+  const shift = Math.round((parseYmd(targetMon) - parseYmd(pkg.weekStart)) / 864e5);
+  for (const p of pkg.pantry) if (!findPantryByName(p.name)) addPantryItem(p.name, p.category, 'have');
+  const pid = (name) => { const p = name ? findPantryByName(name) : null; return p ? p.id : null; };
+  for (const f of pkg.foods) {
+    if (findFoodByName(f.name)) continue;
+    const components = f.components.map((c) => ({ id: uid(), name: c.name, amount: c.amount, calories: c.calories, pantryId: pid(c.pantryName) }));
+    const total = compsTotal(components);
+    state.foods.push({ id: uid(), name: f.name, serving: f.serving, calories: total != null ? total : f.calories, estimate: f.estimate, snack: f.snack, notes: f.notes, components,
+      pantryIds: [...new Set(f.pantryNames.map(pid).filter(Boolean))], picture: { type: 'emoji', value: f.emoji || autoEmoji(f.name) } });
+  }
+  for (const m of pkg.meals) {
+    if (findMealByName(m.name)) continue;
+    const items = m.items.map((it) => {
+      const f = it.foodName ? findFoodByName(it.foodName) : null;
+      if (f) return { id: uid(), foodId: f.id, servings: it.servings };
+      return { id: uid(), customName: it.customName || it.foodName || '(deleted food)', customCalories: it.customCalories || 0, servings: it.servings };
+    });
+    const meal = { id: uid(), name: m.name, items, notes: m.notes, picture: null };
+    meal.picture = m.emoji ? { type: 'emoji', value: m.emoji } : autoPictureFor(meal);
+    state.meals.push(meal);
+  }
+  if (mode === 'replace') {
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(targetMon, i), w = state.weeks[targetMon], day = w && w.days[d];
+      if (day) for (const [slot] of SLOTS) delete day[slot];
+    }
+  }
+  let added = 0;
+  for (const [date, slots] of Object.entries(pkg.days)) {
+    const nd = addDays(date, shift);
+    for (const [slot] of SLOTS) for (const e of slots[slot] || []) {
+      let data;
+      if (e.kind === 'meal') { const m = findMealByName(e.name); data = m ? { kind: 'meal', mealId: m.id, servings: e.servings } : null; }
+      else if (e.kind === 'food') { const f = findFoodByName(e.name); data = f ? { kind: 'food', foodId: f.id, servings: e.servings } : null; }
+      else data = { kind: 'custom', customName: e.name, customCalories: e.calories || 0, servings: e.servings };
+      if (!data) continue;
+      addEntry(nd, slot, data, e.time); added++;
+    }
+  }
+  return added;
+}
+
+function downloadBlob(name, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = h('a', { href: url, download: name, style: 'display:none' });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function shareWeekSheet() {
+  const mon = ui.week, range = weekRange(mon);
+  const { pkg, count } = buildWeekPackage(mon);
+  if (!count) {
+    const api = openSheet('Share this week', [h('p', { class: 'sub' }, `(${range})`),
+      h('p', { style: 'color:var(--muted)', id: 'share-empty' }, 'Nothing is planned this week yet, so there is nothing to share. Plan some meals first.'),
+      h('button', { class: 'btn block', type: 'button', disabled: true, id: 'share-file' }, 'Share file…')],
+      h('button', { class: 'btn secondary', type: 'button', onClick: () => api.close() }, 'Close'));
+    return;
+  }
+  const json = JSON.stringify(pkg, null, 2), name = `healthy-eating-week-${mon}.json`;
+  const code = SHARE_PREFIX + b64urlEncode(JSON.stringify(pkg));
+  const status = h('p', { class: 'sub', id: 'share-status', role: 'status', 'aria-live': 'polite' });
+  const fallback = h('textarea', { class: 'input', id: 'share-code', readonly: true, hidden: true, 'aria-label': 'Shared text', rows: '4', value: code });
+  const makeFile = () => new File([json], name, { type: 'application/json' });
+  const download = () => { try { downloadBlob(name, new Blob([json], { type: 'application/json' })); status.textContent = `Downloaded ${name}`; } catch (e) { status.textContent = 'Your browser blocked the download. Try "Copy as text" instead.'; } };
+  const shareFile = async () => {
+    let file = null;
+    try { file = makeFile(); } catch (e) { file = null; }
+    try {
+      if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: `Healthy Eating week of ${range}` });
+        status.textContent = 'Shared'; return;
+      }
+    } catch (e) { if (e && e.name === 'AbortError') return; /* otherwise fall back to a download */ }
+    download();
+  };
+  const copyText = async () => {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('no clipboard');
+      await navigator.clipboard.writeText(code);
+      status.textContent = 'Copied. Paste it on your other device.'; fallback.hidden = true;
+    } catch (e) {
+      fallback.hidden = false; fallback.focus(); fallback.select();
+      status.textContent = 'Could not copy automatically. The text is selected below: copy it yourself.';
+    }
+  };
+  const size = fmtBytes(code.length);
+  const api = openSheet('Share this week', [
+    h('p', { class: 'sub', id: 'share-summary' }, `(${range}) · ${plural(count, 'meal', 'meals')} planned`),
+    h('p', { class: 'setting-desc' }, 'Creates a small file with this week’s meals, plus the foods, meals and pantry items they need. Your photos and eaten ticks stay on this device.'),
+    h('div', { class: 'stack' },
+      h('button', { class: 'btn block', type: 'button', id: 'share-file', onClick: shareFile }, 'Share file…'),
+      h('button', { class: 'btn tonal block', type: 'button', id: 'share-download', onClick: download }, 'Download file'),
+      h('button', { class: 'btn tonal block', type: 'button', id: 'share-copy', onClick: copyText }, 'Copy as text')),
+    h('p', { class: 'sub', id: 'share-size' }, `Text is about ${size}.` + (code.length > 100 * 1024 ? ' That is long for a message; a file is easier.' : '')),
+    fallback, status,
+    h('p', { class: 'setting-desc' }, 'On your iPhone: open the app → Plan → ⋯ → Open a shared week, then choose the file (AirDrop saves to Files/Downloads; from Mail tap the attachment → Save to Files) or paste the text.')],
+    h('button', { class: 'btn secondary', type: 'button', onClick: () => api.close() }, 'Done'));
+}
+
+function openSharedSheet() {
+  let pkg = null, target = null, mode = 'replace', cal = null;
+  const err = h('p', { class: 'err', role: 'alert', id: 'open-err', hidden: true });
+  const fail = (m) => { err.textContent = m; err.hidden = false; };
+  const foot = h('div', { class: 'form-row', style: 'flex:1' });
+  const api = openSheet('Open a shared week', h('div', null), foot);
+  const readText = (file) => (file.text ? file.text() : new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsText(file); }));
+  const accept = (text) => {
+    try { pkg = parseSharedText(text); } catch (e) { fail(e.message || 'That did not work.'); return; }
+    target = pkg.weekStart; mode = 'replace'; preview();
+  };
+
+  const fileIn = h('input', { type: 'file', class: 'hidden-file', id: 'shared-file', accept: 'application/json,.json,text/plain,.txt', 'aria-label': 'Choose shared week file', tabindex: '-1',
+    onChange: async () => {
+      const f = fileIn.files && fileIn.files[0]; fileIn.value = '';
+      if (!f) return;
+      err.hidden = true;
+      if (f.size > SHARE_LIMITS.bytes) return fail('That file is too large to be a shared week.');
+      let text; try { text = await readText(f); } catch (e) { return fail('That file could not be read.'); }
+      accept(text);
+    } });
+  const paste = h('textarea', { class: 'input', id: 'shared-text', rows: '4', placeholder: 'HEWEEK1:…', 'aria-label': 'Paste the shared text', autocapitalize: 'none', autocomplete: 'off', spellcheck: 'false' });
+  const start = () => {
+    api.body.replaceChildren(
+      h('p', { class: 'setting-desc' }, 'Choose the file you shared from your other device, or paste the shared text.'),
+      h('button', { class: 'btn block', type: 'button', id: 'choose-shared', onClick: () => fileIn.click() }, 'Choose file…'), fileIn,
+      field('or paste the shared text', paste),
+      h('button', { class: 'btn tonal block', type: 'button', id: 'use-pasted', onClick: () => { err.hidden = true; accept(paste.value); } }, 'Use pasted text'),
+      err);
+    foot.replaceChildren(h('button', { class: 'btn secondary', type: 'button', onClick: () => api.close() }, 'Cancel'));
+  };
+
+  const preview = () => {
+    const targetLine = h('p', { class: 'sub', id: 'target-line' });
+    const calHost = h('div', { hidden: true });
+    const drawTarget = () => { targetLine.textContent = target === pkg.weekStart ? `It will go into the same week: ${weekRange(target)}.` : `It will go into ${weekRange(target)} (shifted from ${weekRange(pkg.weekStart)}).`; };
+    drawTarget();
+    const other = h('button', { class: 'btn tonal block', type: 'button', id: 'other-week', 'aria-expanded': 'false', onClick: () => {
+      calHost.hidden = !calHost.hidden; other.setAttribute('aria-expanded', String(!calHost.hidden));
+      if (!calHost.hidden && !calHost.firstChild) { cal = calendarEl(target, (d) => { target = mondayOf(d); drawTarget(); }); calHost.append(cal.el); }
+    } }, 'Put it in a different week');
+    const modeSeg = segmented([['replace', 'Replace that week’s meal plan'], ['add', 'Add to what’s already planned']], mode, (v) => { mode = v; });
+    modeSeg.id = 'mode-seg';
+    api.body.replaceChildren(
+      h('p', { class: 'name', id: 'preview-text', style: 'font-weight:600' }, sharedPreviewText(pkg)),
+      pkg.from ? h('p', { class: 'sub' }, `Shared from your ${pkg.from}.`) : null,
+      targetLine, other, calHost,
+      h('div', { class: 'field' }, h('span', null, 'When it lands'), modeSeg),
+      h('p', { class: 'setting-desc' }, 'Foods, meals and pantry items you already have are kept exactly as they are; only missing ones are added. Your snack log is not touched.'));
+    foot.replaceChildren(
+      h('button', { class: 'btn secondary', type: 'button', onClick: () => { err.hidden = true; start(); } }, 'Back'),
+      h('button', { class: 'btn', type: 'button', id: 'add-shared', onClick: doAdd }, 'Add to my plan'));
+  };
+  const doAdd = () => {
+    const snapshot = JSON.stringify(state);
+    const n = applySharedWeek(pkg, target, mode);
+    ui.tab = 'plan'; ui.week = target; ui.day = target;
+    while (sheetStack.length) sheetStack[sheetStack.length - 1].close();
+    commit(); window.scrollTo(0, 0);
+    toast(`Added ${plural(n, 'meal', 'meals')} to ${weekRange(target)}`, { action: 'Undo', ms: 8000, onAction: () => { try { state = JSON.parse(snapshot); commit(); toast('Undone'); } catch (e) { /* keep current */ } } });
+  };
+  start();
 }
 
 async function exportBackup() {
@@ -2132,7 +2483,7 @@ async function importFile(input) {
   const ok = await confirmSheet({ title: 'Replace all data?', confirmLabel: 'Replace', danger: true,
     message: `This backup has ${parsed.pantry.length} pantry items, ${parsed.foods.length} foods, ${parsed.meals.length} meals, ${Object.keys(photosIn).length} photos, ${entries} planned entries and ${parsed.snackLog.length} logged snacks. Importing replaces everything currently in the app.` });
   if (!ok) return;
-  parsed.settings.seededFoodsV1 = true; parsed.settings.seededMealsV1 = true; parsed.settings.seededRecipesV2 = true; parsed.settings.smoothieV3 = true; parsed.settings.snackNamesV4 = true; parsed.settings.appliedBatches = [...new Set([...(Array.isArray(parsed.settings.appliedBatches) ? parsed.settings.appliedBatches : []), ...allBatchIds()])]; // an imported backup is what the user wants; do not merge starter foods on top
+  parsed.settings.seededFoodsV1 = true; parsed.settings.seededMealsV1 = true; parsed.settings.seededRecipesV2 = true; parsed.settings.smoothieV3 = true; // an imported backup is what the user wants; do not re-merge the one-time starter sets. Batches and snack names are kept as the backup says and applied after the import (add-only by name), so a backup from an older app still gets newer foods.
   await photoClearAll();
   let lost = 0;
   for (const it of [...parsed.foods, ...parsed.meals]) {
@@ -2141,7 +2492,10 @@ async function importFile(input) {
     if (url && await photoSave(it.picture.id, url)) continue;
     it.picture = autoPictureFor(it, parsed.foods); lost++; // photo missing from the file or could not be stored
   }
-  state = parsed; ui.week = mondayOf(today()); ui.day = today(); commit();
+  state = parsed; ui.week = mondayOf(today()); ui.day = today();
+  if (!state.settings.snackNamesV4) { markSnackNames(state.foods); state.settings.snackNamesV4 = true; }
+  const nb = applyBatches(false); // batches the backup had not seen (add-only by name; never overwrites)
+  commit();
   toast(lost ? `Backup imported (${lost} ${lost === 1 ? 'photo' : 'photos'} could not be restored)` : 'Backup imported');
 }
 
