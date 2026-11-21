@@ -727,5 +727,11 @@ window.SEED_BATCHES = [
     foods: [
       { name: "Mandarin orange", serving: "1 medium (~88 g)", calories: 47, emoji: "🍊",
         notes: "Fresh mandarin / clementine (Cuties, Halos are similar, about 40 to 47 each).", pantry: ["Mandarin oranges"] }
+    ] },
+  { id: "2026-11-21-snacks",
+    pantry: [ { name: "Granola bars", category: "Pantry" } ],
+    foods: [
+      { name: "Granola bar", serving: "1 bar", calories: 100, estimate: true, emoji: "🍫", snack: true,
+        notes: "Generic chewy granola bar (e.g. Quaker Chewy, ~100 kcal). Change it to your brand.", pantry: ["Granola bars"] }
     ] }
 ];

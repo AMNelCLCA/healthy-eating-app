@@ -3,10 +3,11 @@
 (() => {
 'use strict';
 
-const VERSION = '1.3.4-laptop';
+const VERSION = '1.4.0-laptop';
 const KEY = 'healthyEating.v1'; // storage key is unchanged so existing data is found and migrated in place
-const SCHEMA = 3;
-const SLOTS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snack', 'Snack']];
+const SCHEMA = 4;
+const SLOTS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner']]; // snacks are logged, not planned (state.snackLog)
+const SNACK_NAMES_V4 = ['Banana', 'Apple', 'Grapes', 'Mandarin orange', 'Goldfish crackers', 'Ritz crackers', 'Carrots'];
 const SLOT_LABEL = Object.fromEntries(SLOTS);
 const LOOKUP_TIMEOUT = 8000;
 const UIKEY = 'healthyEating.ui'; // per-device view preferences (Menu Meals/Foods, Plan Day/Week)
@@ -26,6 +27,7 @@ const parseYmd = (s) => { const [y, m, d] = s.split('-').map(Number); return new
 const addDays = (s, n) => { const d = parseYmd(s); d.setDate(d.getDate() + n); return ymd(d); };
 const mondayOf = (s) => { const d = parseYmd(s); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return ymd(d); };
 const today = () => ymd(new Date());
+const nowHM = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const isDate = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && ymd(parseYmd(s)) === s;
 const numFmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
 const fmt = (n) => numFmt.format(Math.round(n || 0));
@@ -207,7 +209,7 @@ async function photoFromFile(file) {
 const fmtBytes = (n) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
 /* ---------- state, migration & storage ---------- */
-const blank = () => ({ schemaVersion: SCHEMA, pantry: [], foods: [], meals: [], weeks: {}, settings: { dailyGoal: null, seededFoodsV1: false, seededMealsV1: false, seededRecipesV2: false, smoothieV3: false, appliedBatches: [] } });
+const blank = () => ({ schemaVersion: SCHEMA, pantry: [], foods: [], meals: [], weeks: {}, snackLog: [], settings: { dailyGoal: null, seededFoodsV1: false, seededMealsV1: false, seededRecipesV2: false, smoothieV3: false, snackNamesV4: false, appliedBatches: [] } });
 let state = blank();
 let storageOk = true;
 let storageNote = '';
@@ -292,7 +294,7 @@ function normalize(raw) {
         calories: calOrNull(c.calories, `Ingredient "${c.name}"`), pantryId: typeof c.pantryId === 'string' && pantryIds.has(c.pantryId) ? c.pantryId : null };
     });
     out.foods.push({ id, name: f.name.trim(), serving: typeof f.serving === 'string' && f.serving.trim() ? f.serving.trim() : '1 serving',
-      calories: cal, estimate: f.estimate === true, notes: typeof f.notes === 'string' ? f.notes.trim() : '', components,
+      calories: cal, estimate: f.estimate === true, snack: f.snack === true, notes: typeof f.notes === 'string' ? f.notes.trim() : '', components,
       pantryIds: Array.isArray(f.pantryIds) ? [...new Set(f.pantryIds.filter((x) => pantryIds.has(x)))] : [],
       picture: normPicture(f.picture) || { type: 'emoji', value: autoEmoji(f.name) } });
   });
@@ -317,13 +319,23 @@ function normalize(raw) {
     out.meals.push(meal);
   });
   const entryIds = new Set();
+  const fromV = schemaOf(src);
+  const snackLog = [];
+  const logIds = new Set();
+  const perMeal = (m) => m.items.reduce((a, it) => {
+    const sv = Number.isFinite(Number(it.servings)) ? Number(it.servings) : 1;
+    const f = it.foodId ? out.foods.find((x) => x.id === it.foodId) : null;
+    return a + (f ? (foodKcal(f) || 0) : (Number(it.customCalories) || 0)) * sv;
+  }, 0);
+  // v1-v3 planned snacks: an eaten one becomes a snack-log entry on that date, a planned-but-not-eaten one is dropped (kept in the pre-v4 copy)
+  const planSlots = [...SLOTS.map((x) => x[0]), 'snack'];
   for (const [wk, week] of Object.entries(src.weeks)) {
     if (!isDate(wk)) throw new Error(`"${wk}" is not a valid week date.`);
     if (!week || typeof week !== 'object' || !week.days || typeof week.days !== 'object') throw new Error(`Week ${wk} is not valid.`);
     for (const [date, slots] of Object.entries(week.days)) {
       if (!isDate(date)) throw new Error(`"${date}" is not a valid date.`);
       if (!slots || typeof slots !== 'object') continue;
-      for (const [slot] of SLOTS) {
+      for (const slot of planSlots) {
         const list = slots[slot];
         if (list == null) continue;
         if (!Array.isArray(list)) throw new Error(`${date} ${slot} is not valid.`);
@@ -341,6 +353,15 @@ function normalize(raw) {
             entry.customCalories = Number.isFinite(Number(e.customCalories)) ? Math.max(0, Number(e.customCalories)) : 0;
           } else continue; // refers to a food that does not exist; skip it
           if (typeof e.time === 'string' && /^\d{2}:\d{2}$/.test(e.time)) entry.time = e.time;
+          if (slot === 'snack') {
+            if (!entry.eaten) continue;
+            const t = { id: uid(), foodId: null, date, time: entry.time || '', servings: entry.servings, name: '', cal: null };
+            if (entry.kind === 'food') { const f = out.foods.find((x) => x.id === entry.foodId); t.foodId = f.id; t.name = f.name; t.cal = foodKcal(f); }
+            else if (entry.kind === 'meal') { const m = out.meals.find((x) => x.id === entry.mealId); t.name = m.name; t.cal = perMeal(m); }
+            else { t.name = entry.customName; t.cal = entry.customCalories; }
+            snackLog.push(t);
+            continue;
+          }
           const mon = mondayOf(date);
           const w = out.weeks[mon] || (out.weeks[mon] = { days: {} });
           const d = w.days[date] || (w.days[date] = {});
@@ -349,6 +370,20 @@ function normalize(raw) {
       }
     }
   }
+  (Array.isArray(src.snackLog) ? src.snackLog : []).forEach((s) => {
+    if (!s || typeof s !== 'object' || !isDate(s.date)) return;
+    const sv = Number(s.servings), cal = Number(s.cal);
+    const fid = typeof s.foodId === 'string' && foodIds.has(s.foodId) ? s.foodId : null;
+    const f = fid ? out.foods.find((x) => x.id === fid) : null;
+    snackLog.push({ id: typeof s.id === 'string' && s.id && !logIds.has(s.id) ? s.id : uid(), foodId: fid, date: s.date,
+      time: typeof s.time === 'string' && /^\d{2}:\d{2}$/.test(s.time) ? s.time : '',
+      servings: Number.isFinite(sv) && sv > 0 ? Math.min(99, sv) : 1,
+      name: typeof s.name === 'string' && s.name.trim() ? s.name.trim() : (f ? f.name : 'Snack'),
+      cal: s.cal != null && s.cal !== '' && Number.isFinite(cal) && cal >= 0 ? cal : null });
+    logIds.add(s.id);
+  });
+  snackLog.forEach((s, i) => { if (snackLog.findIndex((x) => x.id === s.id) !== i) s.id = uid(); });
+  out.snackLog = snackLog;
   const st = src.settings && typeof src.settings === 'object' ? src.settings : {};
   const g = Number(st.dailyGoal);
   out.settings.dailyGoal = st.dailyGoal != null && Number.isFinite(g) && g > 0 ? g : null;
@@ -356,10 +391,15 @@ function normalize(raw) {
   out.settings.seededMealsV1 = st.seededMealsV1 === true;
   out.settings.seededRecipesV2 = st.seededRecipesV2 === true;
   out.settings.smoothieV3 = st.smoothieV3 === true;
+  if (fromV < 4) { markSnackNames(out.foods); out.settings.snackNamesV4 = true; } // v4 migration: default snack foods (idempotent, once)
+  else out.settings.snackNamesV4 = st.snackNamesV4 === true;
   out.settings.appliedBatches = Array.isArray(st.appliedBatches) ? st.appliedBatches.filter((x) => typeof x === 'string') : [];
   return out;
 }
 
+function markSnackNames(foods) {
+  for (const f of foods) if (SNACK_NAMES_V4.some((n) => n.toLowerCase() === f.name.toLowerCase())) f.snack = true;
+}
 function load() {
   let raw = null;
   try {
@@ -375,9 +415,10 @@ function load() {
     const from = schemaOf(unwrap(parsed));
     state = normalize(parsed);
     if (from < SCHEMA) {
-      // keep the untouched pre-migration copy once (v1 data under .preV2, anything older than v3 under .preV3), then store the migrated data
+      // keep the untouched pre-migration copy once (v1 data under .preV2, older than v3 under .preV3, older than v4 under .preV4), then store the migrated data
       try { if (from < 2 && !localStorage.getItem(KEY + '.preV2')) localStorage.setItem(KEY + '.preV2', raw); } catch (_) { /* ignore */ }
-      try { if (!localStorage.getItem(KEY + '.preV3')) localStorage.setItem(KEY + '.preV3', raw); } catch (_) { /* ignore */ }
+      try { if (from < 3 && !localStorage.getItem(KEY + '.preV3')) localStorage.setItem(KEY + '.preV3', raw); } catch (_) { /* ignore */ }
+      try { if (!localStorage.getItem(KEY + '.preV4')) localStorage.setItem(KEY + '.preV4', raw); } catch (_) { /* ignore */ }
       save();
     }
   } catch (e) {
@@ -483,12 +524,37 @@ function sortedEntries(date, slot) {
     if (ta) return -1; if (tb) return 1; return a[1] - b[1];
   }).map((x) => x[0]);
 }
+/* snack log: one entry per time you broke a snack out. kcal = CURRENT food kcal when the food still exists, else the snapshot taken at log time */
+const snackFoods = () => state.foods.filter((f) => f.snack).sort(byName);
+function snackInfo(s) {
+  const sv = isNum(s.servings) && s.servings > 0 ? s.servings : 1;
+  const f = s.foodId ? foodById(s.foodId) : null;
+  let per = f ? foodKcal(f) : null;
+  if (per == null && isNum(s.cal)) per = s.cal;
+  const name = f ? f.name : (s.name || 'Snack');
+  return { name, sv, per, unknown: per == null, cal: Math.round((per || 0) * sv), est: !!(f && f.estimate), serving: f ? f.serving : '',
+    kcalText: per == null ? 'kcal ?' : `${f && f.estimate ? '≈ ' : ''}${fmt(per * sv)} kcal`, picItem: f || { name, picture: null }, food: f };
+}
+function snacksOn(date) {
+  return state.snackLog.map((e, i) => [e, i]).filter(([e]) => e.date === date).sort((a, b) => {
+    const ta = a[0].time, tb = b[0].time;
+    if (ta && tb) return ta.localeCompare(tb) || a[1] - b[1];
+    if (ta) return -1; if (tb) return 1; return a[1] - b[1];
+  }).map((x) => x[0]);
+}
+function snackTotal(date) {
+  let kcal = 0, count = 0, unknown = 0;
+  for (const e of snacksOn(date)) { const i = snackInfo(e); kcal += i.cal; count++; if (i.unknown) unknown++; }
+  return { kcal, count, unknown };
+}
+/* Planned = breakfast/lunch/dinner planned. Eaten = ticked planned entries + every logged snack. */
 function dayTotals(date) {
   let planned = 0, eaten = 0, unknown = 0;
   for (const [s] of SLOTS) for (const e of entriesOf(date, s)) {
     const i = entryInfo(e); planned += i.cal; if (e.eaten) eaten += i.cal; if (i.unknown) unknown++;
   }
-  return { planned, eaten, unknown };
+  const sn = snackTotal(date);
+  return { planned, eaten: eaten + sn.kcal, unknown: unknown + sn.unknown, snack: sn.kcal, snackCount: sn.count, total: planned + sn.kcal };
 }
 function weekEntryCount(mon) {
   const w = state.weeks[mon]; if (!w) return 0;
@@ -511,7 +577,8 @@ function groupByCategory(items) {
 }
 
 /* ---------- ui state (not persisted) ---------- */
-const ui = { tab: 'plan', week: mondayOf(today()), day: today(), menuMode: 'meals', menuQ: '', menuCan: false, planView: 'day', wideView: null, pickMode: 'meals', pantryQ: '' };
+const ui = { tab: 'plan', week: mondayOf(today()), day: today(), menuMode: 'meals', menuQ: '', menuCan: false, planView: 'day', wideView: null, pickMode: 'meals', pantryQ: '', snackDate: null /* null = follow today */ };
+const snackDate = () => ui.snackDate || today();
 /* laptop: wide windows (>= 1000 px) get the sidebar, dialogs and the 7-column week grid */
 const WIDE_MQ = window.matchMedia('(min-width: 1000px)');
 const isWide = () => WIDE_MQ.matches;
@@ -561,6 +628,7 @@ function deleteFood(food) {
   for (const m of state.meals) for (const it of m.items) {
     if (it.foodId === food.id) { it.customName = food.name; it.customCalories = k == null ? 0 : k; delete it.foodId; }
   }
+  for (const s of state.snackLog) if (s.foodId === food.id) { s.foodId = null; s.name = food.name; s.cal = k; }
   if (food.picture && food.picture.type === 'photo') photoDelete(food.picture.id);
   state.foods = state.foods.filter((f) => f.id !== food.id);
   commit();
@@ -579,6 +647,18 @@ function addEntry(date, slot, data, time) {
   if (time) e.time = time;
   slotArr(date, slot, true).push(e);
   return e;
+}
+function addSnackLog(food, date, servings, time) {
+  const k = foodKcal(food);
+  const e = { id: uid(), foodId: food.id, date, time: time || '', servings, name: food.name, cal: k };
+  state.snackLog.push(e); return e;
+}
+function removeSnackLog(e) { const i = state.snackLog.indexOf(e); if (i >= 0) state.snackLog.splice(i, 1); return i; }
+/* one tap: log 1 serving now for the date, with Undo */
+function quickLogSnack(food, date) {
+  const e = addSnackLog(food, date, 1, nowHM()); commit();
+  const k = foodKcal(food);
+  toast(`Logged ${food.name} · ${k == null ? 'kcal ?' : fmt(k) + ' kcal'}`, { action: 'Undo', onAction: () => { removeSnackLog(e); commit(); } });
 }
 function copyLastWeek(target) {
   const prev = state.weeks[addDays(target, -7)];
@@ -610,7 +690,7 @@ function mergeSeed(S = window.SEED_FOODS) {
     const total = compsTotal(components);
     state.foods.push({ id: uid(), name: f.name, serving: f.serving || '1 serving',
       calories: total != null ? total : (isNum(f.calories) ? f.calories : null),
-      estimate: f.estimate === true, notes: f.notes || '', components,
+      estimate: f.estimate === true, snack: f.snack === true, notes: f.notes || '', components,
       pantryIds: [...new Set((f.pantry || []).map(pid).filter(Boolean))], picture: { type: 'emoji', value: f.emoji || autoEmoji(f.name) } });
     res.foods++;
   }
@@ -629,7 +709,7 @@ function applyFoodUpdate(F) {
     pantryIds: [...new Set((F.pantry || []).map(pid).filter(Boolean))] };
   const existing = findFoodByName(F.name);
   if (existing) Object.assign(existing, fields);
-  else state.foods.push({ id: uid(), name: F.name, ...fields, picture: { type: 'emoji', value: F.emoji || autoEmoji(F.name) } });
+  else state.foods.push({ id: uid(), name: F.name, snack: F.snack === true, ...fields, picture: { type: 'emoji', value: F.emoji || autoEmoji(F.name) } });
   return true;
 }
 
@@ -744,6 +824,14 @@ function segmented(options, current, onPick) {
   const draw = (cur) => wrap.replaceChildren(...options.map(([val, label]) =>
     h('button', { type: 'button', 'aria-pressed': String(val === cur), onClick: () => { onPick(val); draw(val); } }, label)));
   draw(current); return wrap;
+}
+/* on/off row: the whole row is a switch */
+function switchRow(label, checked, onChange, extra) {
+  let on = !!checked;
+  const b = h('button', { class: 'switch-row', type: 'button', role: 'switch', 'aria-checked': String(on), 'aria-label': label, ...(extra || {}) },
+    h('span', { class: 'sw-label' }, label), h('span', { class: 'switch', 'aria-hidden': 'true' }, h('i')));
+  b.addEventListener('click', () => { on = !on; b.setAttribute('aria-checked', String(on)); onChange(on); });
+  return b;
 }
 function storageBanner() {
   return (!storageOk || storageNote) ? h('div', { class: 'warn-banner', role: 'alert' }, storageNote || 'Storage is unavailable.') : null;
@@ -874,10 +962,10 @@ function viewPlan() {
     segmented([['day', 'Day'], ['week', 'Week']], pv, (v) => { if (isWide()) ui.wideView = v; else ui.planView = v; saveUi(); render(); }));
   if (pv === 'day') {
     put(root, h('div', { class: 'days', role: 'group', 'aria-label': 'Days of the week' }, days.map((d) => {
-      const t = dayTotals(d).planned;
+      const dt = dayTotals(d), t = dt.total;
       const long = fmtDate(d, { weekday: 'long', month: 'short', day: 'numeric' });
       return h('button', { class: 'day' + (d === today() ? ' today' : ''), type: 'button', 'aria-pressed': String(d === ui.day),
-        'aria-label': `${long}, ${fmt(t)} kcal planned`, onClick: () => { ui.day = d; render(); } },
+        'aria-label': `${long}, ${fmt(dt.planned)} kcal planned${dt.snack ? `, ${fmt(dt.snack)} kcal snacks` : ''}`, onClick: () => { ui.day = d; render(); } },
         h('span', { class: 'dow' }, fmtDate(d, { weekday: 'short' })),
         h('span', { class: 'num' }, String(parseYmd(d).getDate())),
         h('span', { class: 'tot' }, t ? String(Math.round(t)) : '–'));
@@ -897,6 +985,7 @@ function viewPlan() {
     h('div', { class: 'stats' },
       h('div', { class: 'stat' }, h('b', { id: 'planned-total' }, fmt(tot.planned)), h('span', null, 'Planned kcal')),
       h('div', { class: 'stat' }, h('b', { id: 'eaten-total' }, fmt(tot.eaten)), h('span', null, 'Eaten kcal'))));
+  if (tot.snack) summary.append(h('p', { class: 'sub', id: 'snack-incl', style: 'margin-top:8px;text-align:right' }, `incl. ${fmt(tot.snack)} kcal snacks`));
   if (tot.unknown) summary.append(h('p', { class: 'note-line', id: 'unknown-note' }, `${tot.unknown} ${tot.unknown === 1 ? 'item' : 'items'} without calories (counted as 0)`));
   if (goal) {
     summary.append(h('div', { class: 'goal' },
@@ -920,7 +1009,26 @@ function viewPlan() {
       : h('div', { class: 'card slot-empty' }, 'Nothing planned'));
     put(root, sec);
   }
+  put(root, snackCard(ui.day));
   return root;
+}
+
+/* read-only list of the day's logged snacks + a button that jumps to the Snacks tab for that date */
+function goSnacks(date) {
+  while (sheetStack.length) sheetStack[sheetStack.length - 1].close();
+  ui.snackDate = date === today() ? null : date; ui.tab = 'snacks'; render(); window.scrollTo(0, 0);
+}
+function snackCard(date) {
+  const list = snacksOn(date), sn = snackTotal(date);
+  const sec = h('section', { 'aria-label': 'Snacks', 'data-slot': 'snack', id: 'plan-snacks' });
+  sec.append(h('div', { class: 'slot-head' },
+    h('div', { class: 'left' }, h('h2', null, 'Snacks'), list.length ? h('span', { class: 'sub' }, `${fmt(sn.kcal)} kcal`) : null),
+    h('button', { class: 'pill-btn', type: 'button', id: 'log-snack-btn', 'aria-label': `Log a snack for ${fmtDate(date, { weekday: 'long' })}`, onClick: () => goSnacks(date) }, 'Log a snack')));
+  sec.append(h('div', { class: 'card' }, list.length
+    ? h('div', { class: 'snack-chips' }, list.map((e) => { const i = snackInfo(e);
+        return h('span', { class: 'snack-chip', 'data-log': e.id }, tile(i.picItem, 24), h('span', { class: 'sc-n' }, i.sv !== 1 ? `${i.name} ×${servingsLabel(i.sv)}` : i.name), h('span', { class: 'sc-k' }, i.kcalText.replace(' kcal', ''))); }))
+    : h('div', { class: 'slot-empty' }, 'No snacks logged')));
+  return sec;
 }
 
 function entryRow(e, date, slot) {
@@ -949,7 +1057,9 @@ function weekBody(root, days) {
   const goal = state.settings.dailyGoal;
   let wk = 0, unknown = 0;
   days.forEach((d) => { const t = dayTotals(d); wk += t.planned; unknown += t.unknown; });
+  const snackWk = days.reduce((a, d) => a + snackTotal(d).kcal, 0);
   put(root, h('div', { class: 'card pad wk-sum' }, h('span', null, 'Planned this week'), h('b', { id: 'week-total' }, `${fmt(wk)} kcal`)));
+  if (snackWk) put(root, h('p', { class: 'sub', id: 'week-snacks', style: 'text-align:right' }, `plus ${fmt(snackWk)} kcal of snacks logged`));
   if (unknown) put(root, h('p', { class: 'note-line', id: 'unknown-note' }, `${unknown} ${unknown === 1 ? 'item' : 'items'} without calories (counted as 0)`));
   for (const d of days) {
     const t = dayTotals(d);
@@ -959,8 +1069,8 @@ function weekBody(root, days) {
       h('button', { class: 'dc-name', type: 'button', 'aria-label': `Open ${long} in Day view`,
         onClick: () => { ui.day = d; if (isWide()) ui.wideView = 'day'; else ui.planView = 'day'; saveUi(); render(); window.scrollTo(0, 0); } },
         h('b', null, fmtDate(d, { weekday: 'short' })), h('span', null, fmtDate(d, { month: 'short', day: 'numeric' }))),
-      h('span', { class: 'dc-tot' + (goal && t.planned > goal ? ' over' : ''), 'data-total': String(Math.round(t.planned)) },
-        goal ? `${fmt(t.planned)} / ${fmt(goal)} kcal` : (t.planned ? `${fmt(t.planned)} kcal` : '– kcal'))));
+      h('span', { class: 'dc-tot' + (goal && t.total > goal ? ' over' : ''), 'data-total': String(Math.round(t.total)) },
+        goal ? `${fmt(t.total)} / ${fmt(goal)} kcal` : (t.total ? `${fmt(t.total)} kcal` : '– kcal'))));
     for (const [slot, label] of SLOTS) {
       const list = sortedEntries(d, slot);
       const addLabel = `Add to ${label} on ${fmtDate(d, { weekday: 'long' })}`;
@@ -975,6 +1085,8 @@ function weekBody(root, days) {
           list.map((e) => weekEntry(e, d, slot))));
       }
     }
+    if (t.snackCount) card.append(h('button', { class: 'wk-snacks', type: 'button', 'data-snacks': String(Math.round(t.snack)), 'aria-label': `Snacks on ${fmtDate(d, { weekday: 'long' })}: ${t.snackCount}, ${fmt(t.snack)} kcal. Open Snacks`, onClick: () => goSnacks(d) },
+      h('span', null, `Snacks: ${t.snackCount} · ${fmt(t.snack)} kcal`)));
     put(root, card);
   }
 }
@@ -988,7 +1100,7 @@ function weekEntry(e, date, slot) {
   return h('div', { class: 'wk-entry' + (miss ? ' needs' : ''), 'data-kind': info.kind }, main, miss ? pickup(info.missing, true) : null);
 }
 
-/* ---------- laptop: 7-column week grid (Mon-Sun) x 4 slot rows, with drag and drop ---------- */
+/* ---------- laptop: 7-column week grid (Mon-Sun) x 3 slot rows + a logged-snacks row, with drag and drop ---------- */
 let dragInfo = null;
 function moveOrCopyEntry(from, to, copy) {
   const src = slotArr(from.date, from.slot, false);
@@ -1042,7 +1154,8 @@ function gridBody(root, days) {
       onClick: () => { ui.day = d; ui.wideView = 'day'; saveUi(); render(); window.scrollTo(0, 0); } },
       h('b', null, fmtDate(d, { weekday: 'short' })), h('span', { class: 'dn' }, String(parseYmd(d).getDate())),
       h('span', { class: 'tt' + (goal && t.planned > goal ? ' over' : ''), 'data-total': String(Math.round(t.planned)) },
-        goal ? `${fmt(t.planned)} / ${fmt(goal)} kcal` : `${fmt(t.planned)} kcal`)));
+        goal ? `${fmt(t.planned)} / ${fmt(goal)} kcal` : `${fmt(t.planned)} kcal`),
+      h('span', { class: 'ee' + (goal && t.eaten > goal ? ' over' : ''), 'data-eaten': String(Math.round(t.eaten)) }, t.eaten ? `eaten ${fmt(t.eaten)}` : '')));
   }
   for (const [slot, label] of SLOTS) {
     let rowSum = 0;
@@ -1066,7 +1179,40 @@ function gridBody(root, days) {
       grid.append(cell);
     }
   }
-  put(root, grid, h('p', { class: 'hint' }, 'Drag an entry to another day or meal to move it; hold Alt (Option) while dropping to copy.'));
+  // 4th row: snacks you actually ate (logged, never planned): not draggable; click a chip to edit, "+ Log" to add one for that day
+  const wkSnack = days.reduce((a, d) => a + snackTotal(d).kcal, 0);
+  grid.append(h('div', { class: 'wg-rowh', 'data-slot': 'snack' }, h('b', null, 'Snacks (eaten)'), h('span', null, `${fmt(wkSnack)} kcal`)));
+  for (const d of days) {
+    const list = snacksOn(d), t = snackTotal(d);
+    grid.append(h('div', { class: 'wg-cell', 'data-slot': 'snack', 'data-date': d, role: 'group', 'aria-label': `Snacks eaten, ${fmtDate(d, { weekday: 'long' })}` },
+      list.map((e) => { const i = snackInfo(e);
+        const meta = [`${servingsLabel(i.sv)} ×`, i.kcalText, e.time ? fmtTime(e.time) : null].join(' · ');
+        return h('div', { class: 'gc-entry gc-snack', 'data-log': e.id },
+          h('button', { class: 'gc-main', type: 'button', 'aria-label': `Edit snack ${i.name}`, onClick: () => snackLogSheet({ entry: e }) },
+            tile(i.picItem, 28), h('span', { class: 'gc-txt' }, h('span', { class: 'nm' }, i.name), h('span', { class: 'mt' }, meta)))); }),
+      t.count > 1 ? h('div', { class: 'gc-snack-tot' }, `${fmt(t.kcal)} kcal`) : null,
+      h('button', { class: 'gc-add', type: 'button', 'aria-label': `Log a snack on ${fmtDate(d, { weekday: 'long' })}`, onClick: () => snackPickerSheet(d) }, '+ Log')));
+  }
+  put(root, grid, h('p', { class: 'hint' }, 'Drag an entry to another day or meal to move it; hold Alt (Option) while dropping to copy. Snacks are logged when eaten, not planned.'));
+}
+/* quick snack picker for one day (week grid "+ Log"): tap a snack to log 1 serving now, "…" to set servings/time first */
+function snackPickerSheet(date) {
+  let q = '';
+  const list = h('div', { class: 'card pick-list snack-picker' });
+  const draw = () => {
+    const needle = q.trim().toLowerCase();
+    const arr = snackFoods().filter((f) => f.name.toLowerCase().includes(needle));
+    if (!arr.length) { list.replaceChildren(h('div', { class: 'slot-empty' }, snackFoods().length ? 'No snacks match.' : 'No snack foods yet. Use “Edit snack list” on the Snacks page.')); return; }
+    list.replaceChildren(...arr.map((f) => { const st = foodStatus(f);
+      return h('div', { class: 'row has-tile' + (st.ok ? '' : ' needs'), 'data-id': f.id },
+        h('button', { class: 'sp-main', type: 'button', 'aria-label': `Log ${f.name}`, onClick: () => { api.close(); quickLogSnack(f, date); } },
+          tile(f, 36), h('div', { class: 'grow' }, h('div', { class: 'name' }, f.name), h('div', { class: 'sv' }, f.serving), st.ok ? null : pickup(st.missing, false)),
+          h('span', { class: 'kcal' }, fmtKcal(foodKcal(f), f.estimate))),
+        iconBtn('more', `Servings and time for ${f.name}`, () => { api.close(); snackLogSheet({ food: f, date }); }, 'muted')); }));
+  };
+  draw();
+  const api = openSheet(`Log a snack · ${fmtDate(date, { weekday: 'long', month: 'short', day: 'numeric' })}`, [searchBox('', 'Search snacks', (v) => { q = v; draw(); }), list,
+    h('button', { class: 'btn tonal block', type: 'button', onClick: () => { api.close(); ui.snackDate = date === today() ? null : date; ui.tab = 'snacks'; render(); window.scrollTo(0, 0); } }, 'Open Snacks page')]);
 }
 
 function planMenu() {
@@ -1335,7 +1481,7 @@ function foodDetail(food) {
   const pantry = allPantryIds(food).map(pantryById).filter(Boolean).sort(byName);
   const top = detailTop(food, () => pictureSheet({ current: food.picture, auto: () => ({ type: 'emoji', value: autoEmoji(food.name) }),
     onPick: (p) => { applyPicture(food, p); top.draw(); } }), fmtKcal(k, food.estimate), `per ${food.serving}`,
-    [flag(foodStatus(food), true), food.estimate ? h('span', { class: 'tag est' }, '≈ estimate') : null]);
+    [flag(foodStatus(food), true), food.estimate ? h('span', { class: 'tag est' }, '≈ estimate') : null, food.snack ? h('span', { class: 'tag plain' }, 'Snack') : null]);
   const inMeals = state.meals.filter((m) => m.items.some((it) => it.foodId === food.id)).sort(byName);
   const body = [
     top.el,
@@ -1451,8 +1597,9 @@ function mealSheet(meal) {
   api.onClose = () => { if (!saved) holder.finish(false); };
 }
 
-function foodSheet(food) {
+function foodSheet(food, opts = {}) {
   const editing = !!food;
+  let snack = food ? food.snack === true : opts.snack === true;
   const chosen = new Set(food ? food.pantryIds : []);
   let q = '';
   let estimate = food ? food.estimate : false;
@@ -1548,6 +1695,7 @@ function foodSheet(food) {
   draw(); refresh();
 
   const estSeg = segmented([['exact', 'Exact'], ['est', '≈ Estimate']], estimate ? 'est' : 'exact', (v) => { estimate = v === 'est'; });
+  const snackSw = switchRow('Show in Snacks', snack, (v) => { snack = v; });
 
   const submit = async () => {
     const name = nameIn.value.trim();
@@ -1580,17 +1728,18 @@ function foodSheet(food) {
         return;
       }
     }
-    const data = { name, serving, calories: cal, estimate, notes: notesIn.value.trim(), components: comps, pantryIds: [...chosen].filter(pantryById),
+    const data = { name, serving, calories: cal, estimate, snack, notes: notesIn.value.trim(), components: comps, pantryIds: [...chosen].filter(pantryById),
       picture: holder.pic || { type: 'emoji', value: autoEmoji(name) } };
     if (editing) Object.assign(food, data); else state.foods.push({ id: uid(), ...data });
     holder.finish(true, oldPic); saved = true;
     api.close(); commit(); toast(editing ? 'Food saved' : 'Food added');
   };
-  const api = openSheet(editing ? 'Edit food' : 'New food', [
+  const api = openSheet(editing ? 'Edit food' : (opts.snack ? 'New snack food' : 'New food'), [
     h('div', { class: 'form-row pic-row' }, picBtn, field('Name', nameIn)),
     field('Serving', servingIn),
     h('div', { class: 'field' }, h('span', null, 'Calories per serving'), h('div', { class: 'form-row cal-row' }, calIn, findCal), calHint),
     h('div', { class: 'field' }, h('span', null, 'Accuracy'), estSeg),
+    snackSw,
     h('div', { class: 'field' }, h('span', null, 'Ingredients & amounts (optional)'),
       h('div', { class: 'stack' }, compsWrap, totalBox,
         h('button', { class: 'btn tonal block', type: 'button', onClick: () => { const r = addRow(); refresh(); r.nameIn.focus(); } }, '+ Add ingredient'))),
@@ -1745,6 +1894,155 @@ function lookupSheet({ query, onUse }) {
   }
   if ((query || '').trim()) run(); else showResults();
   setTimeout(() => { if (!closed && !(query || '').trim()) input.focus(); }, 50);
+}
+
+/* ---------- SNACKS: keep them in the bag, tap when you break one out ---------- */
+function snackDateLabel(date) {
+  return date === today() ? 'Today' : date === addDays(today(), -1) ? 'Yesterday' : fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+function viewSnacks() {
+  const date = snackDate();
+  const root = h('div', { class: 'view snacks-view' });
+  const foods = snackFoods();
+  const setDate = (d) => { ui.snackDate = d === today() ? null : d; render(); };
+  const grid = foods.length
+    ? h('div', { class: 'snack-grid', id: 'snack-grid' }, foods.map((f) => snackTile(f, date)))
+    : h('div', { class: 'empty card' }, h('strong', null, 'No snack foods yet'), 'Tap “Edit snack list” to choose the foods you keep in your bag.');
+  put(root, storageBanner(),
+    h('header', { class: 'top' }, h('h1', null, 'Snacks'),
+      h('button', { class: 'pill-btn', type: 'button', id: 'edit-snack-list', onClick: snackListSheet }, 'Edit snack list')),
+    h('section', { class: 'card pad snack-date', 'aria-label': 'Day to log for' },
+      h('div', { class: 'sd-row' }, h('span', { class: 'sub' }, 'Logging for:'),
+        h('button', { class: 'date-btn', type: 'button', id: 'snack-date-btn', 'aria-label': `Logging for ${snackDateLabel(date)}. Choose another day`, onClick: () => snackDateSheet(date, setDate) },
+          h('span', null, snackDateLabel(date)), icon('down'))),
+      h('div', { class: 'chips', role: 'group', 'aria-label': 'Quick days' },
+        h('button', { class: 'chip', type: 'button', id: 'snack-today', 'aria-pressed': String(date === today()), onClick: () => setDate(today()) }, 'Today'),
+        h('button', { class: 'chip', type: 'button', id: 'snack-yesterday', 'aria-pressed': String(date === addDays(today(), -1)), onClick: () => setDate(addDays(today(), -1)) }, 'Yesterday'))),
+    grid,
+    snackDayList(date));
+  put(root, snackWeek(date, setDate));
+  return root;
+}
+function snackTile(f, date) {
+  const st = foodStatus(f), k = foodKcal(f);
+  let timer = null, long = false;
+  const clear = () => { clearTimeout(timer); timer = null; };
+  const open = () => { long = true; clear(); snackLogSheet({ food: f, date }); };
+  const main = h('button', { class: 'snack-main', type: 'button', 'data-food': f.id,
+    'aria-label': `Log ${f.name}, ${k == null ? 'calories unknown' : fmt(k) + ' kilocalories'}${st.ok ? '' : '. Out: ' + st.missing.join(', ')}`,
+    onPointerDown: () => { long = false; clear(); timer = setTimeout(open, 500); },
+    onPointerUp: clear, onPointerCancel: clear, onPointerLeave: clear,
+    onContextMenu: (ev) => { ev.preventDefault(); if (!long) open(); },
+    onClick: () => { if (long) { long = false; return; } quickLogSnack(f, date); } },
+    tile(f, 52),
+    h('span', { class: 'sn-name' }, f.name),
+    h('span', { class: 'sn-serv' }, f.serving),
+    h('span', { class: 'sn-kcal' }, fmtKcal(k, f.estimate)),
+    st.ok ? null : pickup(st.missing, false));
+  const more = iconBtn('more', `More options for ${f.name}: servings and time`, () => snackLogSheet({ food: f, date }), 'muted snack-more');
+  return h('div', { class: 'snack-tile' + (st.ok ? '' : ' needs') }, main, more);
+}
+function snackDayList(date) {
+  const list = snacksOn(date), sn = snackTotal(date);
+  const sec = h('section', { class: 'snack-day', 'aria-label': 'Snacks on ' + snackDateLabel(date) });
+  const title = date === today() ? 'Snacks today' : date === addDays(today(), -1) ? 'Snacks yesterday' : `Snacks on ${fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric' })}`;
+  sec.append(h('div', { class: 'slot-head' }, h('div', { class: 'left' }, h('h2', { style: 'background:var(--field)' }, title), list.length ? h('span', { class: 'sub', id: 'snack-day-total' }, `${fmt(sn.kcal)} kcal`) : null)));
+  sec.append(list.length ? h('div', { class: 'card' }, list.map((e) => snackLogRow(e)))
+    : h('div', { class: 'card slot-empty' }, 'Nothing logged yet. Tap a snack above when you eat one.'));
+  return sec;
+}
+function snackLogRow(e) {
+  const i = snackInfo(e);
+  const meta = [`${servingsLabel(i.sv)} ×${i.serving ? ' ' + i.serving : ''}`, i.kcalText, e.time ? fmtTime(e.time) : null].filter(Boolean).join(' · ');
+  return h('div', { class: 'row entry', 'data-log': e.id }, tile(i.picItem, 32),
+    h('div', { class: 'grow' }, h('div', { class: 'name' }, i.name), h('div', { class: 'meta' }, meta)),
+    iconBtn('swap', `Edit ${i.name}`, () => snackLogSheet({ entry: e }), ''),
+    iconBtn('trash', `Remove ${i.name}`, () => {
+      const idx = removeSnackLog(e); commit();
+      toast(`Removed ${i.name}`, { action: 'Undo', onAction: () => { state.snackLog.splice(Math.min(idx, state.snackLog.length), 0, e); commit(); } });
+    }, 'muted'));
+}
+function snackWeek(date, setDate) {
+  const mon = mondayOf(date), days = Array.from({ length: 7 }, (_, i) => addDays(mon, i));
+  const tot = days.reduce((a, d) => a + snackTotal(d).kcal, 0);
+  return h('section', { class: 'snack-week-sec', 'aria-label': 'This week' },
+    h('h2', { class: 'group-title' }, date === today() || mondayOf(today()) === mon ? 'This week' : `Week of ${fmtDate(mon, { month: 'short', day: 'numeric' })}`),
+    h('div', { class: 'card pad' },
+      h('div', { class: 'snack-week', id: 'snack-week', role: 'group', 'aria-label': 'Snack calories per day' }, days.map((d) => {
+        const t = snackTotal(d);
+        return h('button', { class: 'sw-day' + (d === today() ? ' today' : ''), type: 'button', 'data-date': d, 'aria-pressed': String(d === date),
+          'aria-label': `${fmtDate(d, { weekday: 'long', month: 'short', day: 'numeric' })}: ${fmt(t.kcal)} kcal of snacks`, onClick: () => setDate(d) },
+          h('span', { class: 'dow' }, fmtDate(d, { weekday: 'short' })), h('span', { class: 'num' }, String(parseYmd(d).getDate())),
+          h('span', { class: 'tot' }, t.kcal ? String(Math.round(t.kcal)) : '–'));
+      })),
+      h('div', { class: 'total-line' }, h('span', null, 'Week total'), h('b', { id: 'snack-week-total' }, `${fmt(tot)} kcal`))));
+}
+function snackDateSheet(date, onPick) {
+  const cal = calendarEl(date, (d) => { api.close(); onPick(d); });
+  const api = openSheet('Choose a day', [
+    h('div', { class: 'form-row' },
+      h('button', { class: 'btn tonal', type: 'button', onClick: () => { api.close(); onPick(today()); } }, 'Today'),
+      h('button', { class: 'btn tonal', type: 'button', onClick: () => { api.close(); onPick(addDays(today(), -1)); } }, 'Yesterday')),
+    cal.el]);
+}
+/* servings + time (+ day when editing) before logging, or edit / remove an existing log entry */
+function snackLogSheet({ food, entry, date, onDone }) {
+  const editing = !!entry;
+  const info = editing ? snackInfo(entry) : null;
+  const f = editing ? info.food : food;
+  const name = editing ? info.name : f.name;
+  const per = editing ? info.per : foodKcal(f);
+  const preview = h('div', { class: 'preview', id: 'snack-preview' });
+  const upd = () => { const sv = step.get(); preview.textContent = `${servingsLabel(sv)} × ${editing ? (info.serving || 'serving') : f.serving} = ${per == null ? 'kcal ?' : fmt(per * sv) + ' kcal'}`; };
+  const step = stepper(editing ? entry.servings : 1, upd);
+  const timeIn = h('input', { class: 'input', type: 'time', id: 'snack-time', value: editing ? (entry.time || '') : nowHM(), 'aria-label': 'Time' });
+  const dateIn = h('input', { class: 'input', type: 'date', id: 'snack-date', value: editing ? entry.date : (date || snackDate()), 'aria-label': 'Day' });
+  const err = h('p', { class: 'err', role: 'alert', hidden: true });
+  upd();
+  const st = f ? foodStatus(f) : { ok: true, missing: [] };
+  const finish = () => { api.close(); if (onDone) onDone(); };
+  const save_ = () => {
+    if (!isDate(dateIn.value)) { err.textContent = 'Please choose a day.'; err.hidden = false; return; }
+    if (editing) { entry.servings = step.get(); entry.time = timeIn.value || ''; entry.date = dateIn.value; finish(); commit(); toast('Snack updated'); return; }
+    const e = addSnackLog(f, dateIn.value, step.get(), timeIn.value || '');
+    finish(); commit();
+    toast(`Logged ${name} · ${per == null ? 'kcal ?' : fmt(per * e.servings) + ' kcal'}`, { action: 'Undo', onAction: () => { removeSnackLog(e); commit(); } });
+  };
+  const remove = () => {
+    const idx = removeSnackLog(entry); finish(); commit();
+    toast(`Removed ${name}`, { action: 'Undo', onAction: () => { state.snackLog.splice(Math.min(idx, state.snackLog.length), 0, entry); commit(); } });
+  };
+  const api = openSheet(editing ? 'Edit snack' : 'Log a snack', [
+    h('div', { class: 'pick-head' }, tile(editing ? info.picItem : f, 44),
+      h('div', { class: 'grow' }, h('div', { class: 'name', style: 'font-weight:600' }, name), h('div', { class: 'sv' }, editing ? info.serving : f.serving), pickup(st.missing, false))),
+    h('div', { class: 'field' }, h('span', null, 'Amount (servings)'), step.el), preview,
+    h('div', { class: 'form-row' }, field('Time', timeIn), field('Day', dateIn)), err],
+    editing ? [h('button', { class: 'btn danger', type: 'button', id: 'snack-remove', onClick: remove }, 'Remove'), h('button', { class: 'btn', type: 'button', id: 'snack-save', onClick: save_ }, 'Save')]
+      : h('button', { class: 'btn', type: 'button', id: 'snack-log-go', onClick: save_ }, 'Log it'));
+}
+/* choose which foods are snacks */
+function snackListSheet() {
+  let q = '';
+  const first = new Map(state.foods.map((f) => [f.id, f.snack ? 0 : 1])); // snacks first when opened; stable while toggling
+  const list = h('div', { class: 'card pick-list snack-list' });
+  const count = h('p', { class: 'sub', id: 'snack-count' });
+  const draw = () => {
+    const needle = q.trim().toLowerCase();
+    const arr = state.foods.filter((f) => f.name.toLowerCase().includes(needle)).sort((a, b) => (first.get(a.id) - first.get(b.id)) || byName(a, b));
+    count.textContent = `${snackFoods().length} snack ${snackFoods().length === 1 ? 'food' : 'foods'}`;
+    if (!arr.length) { list.replaceChildren(h('div', { class: 'slot-empty' }, state.foods.length ? 'No foods match.' : 'No foods yet. Add one with “New snack food”.')); return; }
+    list.replaceChildren(...arr.map((f) => h('div', { class: 'row has-tile', 'data-id': f.id },
+      tile(f, 36),
+      h('div', { class: 'grow' }, h('div', { class: 'name' }, f.name), h('div', { class: 'sv' }, f.serving)),
+      switchRow('Snack', f.snack, (v) => { f.snack = v; save(); render(); count.textContent = `${snackFoods().length} snack ${snackFoods().length === 1 ? 'food' : 'foods'}`; }, { 'aria-label': `${f.name}: Snack`, class: 'switch-row compact' }))));
+  };
+  draw();
+  const api = openSheet('Edit snack list', [
+    h('p', { class: 'sub' }, 'Switch on the foods you carry as snacks. A food can be both a snack and part of your normal meals.'),
+    count,
+    searchBox('', 'Search foods', (v) => { q = v; draw(); }), list,
+    h('button', { class: 'btn tonal block', type: 'button', id: 'new-snack-food', onClick: () => { api.close(); foodSheet(null, { snack: true }); } }, '+ New snack food')],
+    h('button', { class: 'btn', type: 'button', onClick: () => api.close() }, 'Done'));
 }
 
 /* ---------- PANTRY ---------- */
@@ -1917,7 +2215,7 @@ async function eraseAll() {
     message: 'This permanently deletes your pantry, foods, meals, photos, plans and settings from this device. Export a backup first if you might want it back.' });
   if (!ok) return;
   await photoClearAll();
-  state = blank(); state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; state.settings.seededRecipesV2 = true; state.settings.smoothieV3 = true; state.settings.appliedBatches = allBatchIds(); // do not re-add starter foods on next launch
+  state = blank(); state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; state.settings.seededRecipesV2 = true; state.settings.smoothieV3 = true; state.settings.snackNamesV4 = true; state.settings.appliedBatches = allBatchIds(); // do not re-add starter foods on next launch
   ui.menuQ = ''; ui.pantryQ = ''; ui.menuCan = false; commit(); toast('All data erased');
 }
 
@@ -1956,9 +2254,9 @@ async function importFile(input) {
   }
   const entries = Object.keys(parsed.weeks).reduce((a, k) => a + (parsed.weeks[k] ? Object.values(parsed.weeks[k].days).reduce((x, d) => x + Object.values(d).reduce((y, l) => y + l.length, 0), 0) : 0), 0);
   const ok = await confirmSheet({ title: 'Replace all data?', confirmLabel: 'Replace', danger: true,
-    message: `This backup has ${parsed.pantry.length} pantry items, ${parsed.foods.length} foods, ${parsed.meals.length} meals, ${Object.keys(photosIn).length} photos and ${entries} planned entries. Importing replaces everything currently in the app.` });
+    message: `This backup has ${parsed.pantry.length} pantry items, ${parsed.foods.length} foods, ${parsed.meals.length} meals, ${Object.keys(photosIn).length} photos, ${entries} planned entries and ${parsed.snackLog.length} logged snacks. Importing replaces everything currently in the app.` });
   if (!ok) return;
-  parsed.settings.seededFoodsV1 = true; parsed.settings.seededMealsV1 = true; parsed.settings.seededRecipesV2 = true; parsed.settings.smoothieV3 = true; parsed.settings.appliedBatches = [...new Set([...(Array.isArray(parsed.settings.appliedBatches) ? parsed.settings.appliedBatches : []), ...allBatchIds()])]; // an imported backup is what the user wants; do not merge starter foods on top
+  parsed.settings.seededFoodsV1 = true; parsed.settings.seededMealsV1 = true; parsed.settings.seededRecipesV2 = true; parsed.settings.smoothieV3 = true; parsed.settings.snackNamesV4 = true; parsed.settings.appliedBatches = [...new Set([...(Array.isArray(parsed.settings.appliedBatches) ? parsed.settings.appliedBatches : []), ...allBatchIds()])]; // an imported backup is what the user wants; do not merge starter foods on top
   await photoClearAll();
   let lost = 0;
   for (const it of [...parsed.foods, ...parsed.meals]) {
@@ -1972,7 +2270,7 @@ async function importFile(input) {
 }
 
 /* ---------- shell ---------- */
-const views = { plan: viewPlan, menu: viewMenu, pantry: viewPantry, shopping: viewShopping, settings: viewSettings };
+const views = { plan: viewPlan, menu: viewMenu, snacks: viewSnacks, pantry: viewPantry, shopping: viewShopping, settings: viewSettings };
 function render() {
   const view = document.getElementById('view');
   view.replaceChildren(views[ui.tab]());
@@ -2001,7 +2299,9 @@ if (!state.settings.seededRecipesV2) { seededRecipes = mergeSeed(window.SEED_REC
 let smoothie = false;
 if (!state.settings.smoothieV3) { smoothie = applyFoodUpdate(window.SEED_SMOOTHIE_V3); state.settings.smoothieV3 = true; }
 const batches = applyBatches(false);
-if (seeded || seededMeals || seededRecipes || smoothie || batches.foods || batches.pantry) save();
+let snackMarked = false;
+if (!state.settings.snackNamesV4) { markSnackNames(state.foods); state.settings.snackNamesV4 = true; snackMarked = true; } // fresh installs: after seeding
+if (snackMarked || seeded || seededMeals || seededRecipes || smoothie || batches.foods || batches.pantry) save();
 render();
 if (seeded && seeded.foods) toast(`Added ${seeded.foods} of your foods${seededMeals ? ` and ${seededMeals} meals` : ''}`);
 else if (seeded && seeded.pantry) toast(`Added ${seeded.pantry} pantry items`);
