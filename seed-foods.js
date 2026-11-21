@@ -734,4 +734,11 @@ window.SEED_BATCHES = [
       { name: "Granola bar", serving: "1 bar", calories: 100, estimate: true, emoji: "🍫", snack: true,
         notes: "Generic chewy granola bar (e.g. Quaker Chewy, ~100 kcal). Change it to your brand.", pantry: ["Granola bars"] }
     ] }
+  ,
+  { id: "2026-11-21-v8-energy",
+    pantry: [ { name: "V8 +Energy", category: "Drinks" } ],
+    foods: [
+      { name: "V8 +Energy", serving: "1 can (8 fl oz)", calories: 50, emoji: "🥤", snack: true,
+        notes: "Any flavor is about 45 to 50 kcal; 80 mg caffeine per can.", pantry: ["V8 +Energy"] }
+    ] }
 ];
