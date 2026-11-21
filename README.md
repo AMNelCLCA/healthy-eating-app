@@ -1,6 +1,6 @@
 # Healthy Eating
 
-A personal iPhone home-screen web app (PWA) for planning foods, tracking a pantry, and keeping a calm eye on calories. Plain HTML/CSS/vanilla JS, no build step. Version 1.2.
+A personal iPhone home-screen web app (PWA) for planning foods, tracking a pantry, and keeping a calm eye on calories. Plain HTML/CSS/vanilla JS, no build step. Version 1.2 (phone); this branch is the **laptop** build, version 1.3.0-laptop.
 
 ## Features
 
@@ -12,6 +12,18 @@ A personal iPhone home-screen web app (PWA) for planning foods, tracking a pantr
 - **Pantry / Shopping**: mark items Have or Out; Out items form the shopping list.
 - **Starter foods**: foods and pantry items (`seed-foods.js`) are merged on first launch of v1.1, starter meals on first launch of v1.2, without touching existing data. Settings > "Add my starter foods" re-runs both merges (skips names already present).
 - Always a soft pastel light theme, even if the phone is in dark mode.
+
+## Laptop version
+
+The laptop build (`1.3.0-laptop`, service-worker cache prefix `healthy-eating-laptop-`) uses the same data format (`healthyEating.v1`, schema v3, IndexedDB photos), so backups are interchangeable with the phone version. Windows narrower than 1000 px look exactly like the phone layout.
+
+On windows 1000 px wide or more:
+
+- **Week grid.** The Plan tab's Week view is a full-width grid: seven day columns (Mon to Sun) by four slot rows (Breakfast, Lunch, Dinner, Snack, with the usual peach / mint / lavender / butter tints). Each column header shows the day, date and day kcal (vs goal if set); today is highlighted. Cells list their entries (picture, name, servings, kcal, eaten checkbox, rose dashed style with "Pick up: ..." when an ingredient is out) and a "+ Add" button that opens the picker for that day and slot. Click an entry to edit servings or time, swap it, or remove it. A bar on top shows planned and eaten kcal for the week; each row header shows the week's total for that slot.
+- **Default view.** Plan opens in Week view on wide windows; Day view stays available and your last choice is remembered (separately from the phone-size choice).
+- **Drag and drop.** Drag an entry to another cell to move it; hold Alt (Option) while dropping to copy it (the copy is not marked eaten). A toast offers Undo. Clicking still opens the entry.
+- **Navigation and dialogs.** A left sidebar (with the Shopping badge) replaces the bottom tab bar, sheets open as centered dialogs (max 560 px), the Menu lists use a two-column card grid, and other tabs stay in a 720 px column.
+- Open it with `python3 -m http.server 8000` and use a window at least 1000 px wide (1280 px or more shows the grid comfortably).
 
 ## Photos: where they are stored
 

@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.2.1-laptop';
+const VERSION = '1.3.0-laptop';
 const KEY = 'healthyEating.v1'; // storage key is unchanged so existing data is found and migrated in place
 const SCHEMA = 3;
 const SLOTS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snack', 'Snack']];
@@ -508,18 +508,23 @@ function groupByCategory(items) {
 }
 
 /* ---------- ui state (not persisted) ---------- */
-const ui = { tab: 'plan', week: mondayOf(today()), day: today(), menuMode: 'meals', menuQ: '', menuCan: false, planView: 'day', pickMode: 'meals', pantryQ: '' };
+const ui = { tab: 'plan', week: mondayOf(today()), day: today(), menuMode: 'meals', menuQ: '', menuCan: false, planView: 'day', wideView: null, pickMode: 'meals', pantryQ: '' };
+/* laptop: wide windows (>= 1000 px) get the sidebar, dialogs and the 7-column week grid */
+const WIDE_MQ = window.matchMedia('(min-width: 1000px)');
+const isWide = () => WIDE_MQ.matches;
+const planViewNow = () => (isWide() ? (ui.wideView || 'week') : ui.planView); // wide default is Week until the user toggles
 function loadUi() {
   try {
     const p = JSON.parse(localStorage.getItem(UIKEY) || 'null');
     if (p && typeof p === 'object') {
       if (p.menuMode === 'meals' || p.menuMode === 'foods') ui.menuMode = p.menuMode;
       if (p.planView === 'day' || p.planView === 'week') ui.planView = p.planView;
+      if (p.wideView === 'day' || p.wideView === 'week') ui.wideView = p.wideView;
       if (p.pickMode === 'meals' || p.pickMode === 'foods') ui.pickMode = p.pickMode;
     }
   } catch (e) { /* storage unavailable: defaults */ }
 }
-function saveUi() { try { localStorage.setItem(UIKEY, JSON.stringify({ menuMode: ui.menuMode, planView: ui.planView, pickMode: ui.pickMode })); } catch (e) { /* ignore */ } }
+function saveUi() { try { localStorage.setItem(UIKEY, JSON.stringify({ menuMode: ui.menuMode, planView: ui.planView, wideView: ui.wideView, pickMode: ui.pickMode })); } catch (e) { /* ignore */ } }
 
 /* ---------- mutations ---------- */
 function commit() { save(); render(); }
@@ -821,21 +826,22 @@ function viewPlan() {
   const days = Array.from({ length: 7 }, (_, i) => addDays(ui.week, i));
   if (!days.includes(ui.day)) ui.day = days[0];
   const range = weekRange(ui.week);
+  const pv = planViewNow(), wideWeek = isWide() && pv === 'week';
+  const root = h('div', { class: 'view' + (wideWeek ? ' plan-wide' : '') });
   const goThisWeek = () => { ui.week = mondayOf(today()); ui.day = today(); render(); };
   const shift = (n) => { const idx = days.indexOf(ui.day); ui.week = addDays(ui.week, 7 * n); ui.day = addDays(ui.week, idx); render(); };
 
-  const root = h('div', { class: 'view' });
   put(root,
     storageBanner(),
     h('header', { class: 'top' }, h('h1', null, 'Plan'),
       h('div', { class: 'top-actions' },
-        h('button', { class: 'pill-btn', type: 'button', onClick: goThisWeek }, 'This week'),
+        h('button', { class: 'pill-btn today-btn', type: 'button', onClick: goThisWeek }, wideWeek ? 'Today' : 'This week'),
         iconBtn('more', 'More plan options', planMenu))),
     h('div', { class: 'weeknav' }, iconBtn('left', 'Previous week', () => shift(-1)),
       h('button', { class: 'range range-btn', type: 'button', id: 'week-title', 'aria-label': `Week ${range}. Choose another week`, onClick: weekPickerSheet }, h('span', null, range), icon('down')),
       iconBtn('right', 'Next week', () => shift(1))),
-    segmented([['day', 'Day'], ['week', 'Week']], ui.planView, (v) => { ui.planView = v; saveUi(); render(); }));
-  if (ui.planView === 'day') {
+    segmented([['day', 'Day'], ['week', 'Week']], pv, (v) => { if (isWide()) ui.wideView = v; else ui.planView = v; saveUi(); render(); }));
+  if (pv === 'day') {
     put(root, h('div', { class: 'days', role: 'group', 'aria-label': 'Days of the week' }, days.map((d) => {
       const t = dayTotals(d).planned;
       const long = fmtDate(d, { weekday: 'long', month: 'short', day: 'numeric' });
@@ -852,7 +858,7 @@ function viewPlan() {
       h('p', { class: 'sub', style: 'margin-bottom:10px' }, 'This week is empty. Start from last week’s plan?'),
       h('button', { class: 'btn tonal block', type: 'button', onClick: () => copyLastWeek(ui.week) }, 'Copy last week')));
   }
-  if (ui.planView === 'week') { weekBody(root, days); return root; }
+  if (pv === 'week') { if (wideWeek) gridBody(root, days); else weekBody(root, days); return root; }
 
   const tot = dayTotals(ui.day), goal = state.settings.dailyGoal;
   const summary = h('section', { class: 'card pad summary', 'aria-label': 'Daily summary' },
@@ -898,11 +904,13 @@ function entryRow(e, date, slot) {
   return h('div', { class: 'row entry' + (miss ? ' needs' : ''), 'data-kind': info.kind }, check, tile(info.picItem, 32),
     h('div', { class: 'grow' }, h('div', { class: 'name' + (e.eaten ? ' done' : '') }, info.name), h('div', { class: 'meta' }, meta), miss ? pickup(info.missing, true) : null),
     iconBtn('swap', `Edit ${info.name}`, () => entrySheet({ date, slot, entry: e })),
-    iconBtn('trash', `Remove ${info.name}`, () => {
-      const list = slotArr(date, slot, false); const idx = list.indexOf(e);
-      list.splice(idx, 1); commit();
-      toast(`Removed ${info.name}`, { action: 'Undo', onAction: () => { slotArr(date, slot, true).splice(idx, 0, e); commit(); } });
-    }, 'muted'));
+    iconBtn('trash', `Remove ${info.name}`, () => removeEntry(date, slot, e, info.name), 'muted'));
+}
+function removeEntry(date, slot, e, name) {
+  const list = slotArr(date, slot, false); const idx = list.indexOf(e);
+  if (idx < 0) return;
+  list.splice(idx, 1); commit();
+  toast(`Removed ${name}`, { action: 'Undo', onAction: () => { slotArr(date, slot, true).splice(idx, 0, e); commit(); } });
 }
 
 /* week overview: a vertical list of day cards, each with four slot rows */
@@ -918,7 +926,7 @@ function weekBody(root, days) {
     const card = h('section', { class: 'card daycard' + (d === today() ? ' today' : ''), 'aria-label': long, 'data-date': d });
     card.append(h('div', { class: 'dc-head' },
       h('button', { class: 'dc-name', type: 'button', 'aria-label': `Open ${long} in Day view`,
-        onClick: () => { ui.day = d; ui.planView = 'day'; saveUi(); render(); window.scrollTo(0, 0); } },
+        onClick: () => { ui.day = d; if (isWide()) ui.wideView = 'day'; else ui.planView = 'day'; saveUi(); render(); window.scrollTo(0, 0); } },
         h('b', null, fmtDate(d, { weekday: 'short' })), h('span', null, fmtDate(d, { month: 'short', day: 'numeric' }))),
       h('span', { class: 'dc-tot' + (goal && t.planned > goal ? ' over' : ''), 'data-total': String(Math.round(t.planned)) },
         goal ? `${fmt(t.planned)} / ${fmt(goal)} kcal` : (t.planned ? `${fmt(t.planned)} kcal` : '– kcal'))));
@@ -947,6 +955,87 @@ function weekEntry(e, date, slot) {
     h('span', { class: 'nm' + (e.eaten ? ' done' : '') }, info.sv !== 1 ? `${info.name} ×${servingsLabel(info.sv)}` : info.name),
     h('span', { class: 'k' }, info.kcalText.replace(' kcal', '')));
   return h('div', { class: 'wk-entry' + (miss ? ' needs' : ''), 'data-kind': info.kind }, main, miss ? pickup(info.missing, true) : null);
+}
+
+/* ---------- laptop: 7-column week grid (Mon-Sun) x 4 slot rows, with drag and drop ---------- */
+let dragInfo = null;
+function moveOrCopyEntry(from, to, copy) {
+  const src = slotArr(from.date, from.slot, false);
+  const idx = src ? src.findIndex((x) => x.id === from.id) : -1;
+  if (idx < 0) return;
+  if (!copy && from.date === to.date && from.slot === to.slot) return;
+  const e = src[idx], name = entryInfo(e).name;
+  if (copy) {
+    const c = JSON.parse(JSON.stringify(e)); c.id = uid(); c.eaten = false;
+    slotArr(to.date, to.slot, true).push(c); commit();
+    toast(`Copied ${name} to ${SLOT_LABEL[to.slot]}, ${fmtDate(to.date, { weekday: 'short' })}`, { action: 'Undo', onAction: () => {
+      const l = slotArr(to.date, to.slot, false); const i = l ? l.indexOf(c) : -1; if (i >= 0) { l.splice(i, 1); commit(); } } });
+  } else {
+    src.splice(idx, 1); slotArr(to.date, to.slot, true).push(e); commit();
+    toast(`Moved ${name} to ${SLOT_LABEL[to.slot]}, ${fmtDate(to.date, { weekday: 'short' })}`, { action: 'Undo', onAction: () => {
+      const l = slotArr(to.date, to.slot, false); const i = l ? l.indexOf(e) : -1;
+      if (i >= 0) { l.splice(i, 1); slotArr(from.date, from.slot, true).splice(Math.min(idx, entriesOf(from.date, from.slot).length), 0, e); commit(); } } });
+  }
+}
+function gridEntry(e, date, slot) {
+  const info = entryInfo(e);
+  const miss = info.missing.length > 0 && !e.eaten;
+  const meta = [info.custom ? (info.sv !== 1 ? `${servingsLabel(info.sv)} ×` : null) : `${servingsLabel(info.sv)} ×`, info.kcalText, e.time ? fmtTime(e.time) : null].filter(Boolean).join(' · ');
+  const main = h('button', { class: 'gc-main', type: 'button', 'aria-label': `Edit ${info.name}`, onClick: () => entrySheet({ date, slot, entry: e, removable: true }) },
+    tile(info.picItem, 28),
+    h('span', { class: 'gc-txt' }, h('span', { class: 'nm' + (e.eaten ? ' done' : '') }, info.name), h('span', { class: 'mt' }, meta)));
+  const check = h('button', { class: 'gc-check', type: 'button', role: 'checkbox', 'aria-checked': String(e.eaten), 'aria-label': `Ate ${info.name}`,
+    onClick: () => { e.eaten = !e.eaten; commit(); } }, icon('check'));
+  const el = h('div', { class: 'gc-entry' + (miss ? ' needs' : ''), draggable: 'true', 'data-kind': info.kind, 'data-id': e.id }, main, check, miss ? pickup(info.missing, true) : null);
+  el.addEventListener('dragstart', (ev) => {
+    dragInfo = { id: e.id, date, slot };
+    ev.dataTransfer.effectAllowed = 'copyMove'; ev.dataTransfer.setData('text/plain', e.id);
+    setTimeout(() => el.classList.add('dragging'), 0);
+  });
+  el.addEventListener('dragend', () => { dragInfo = null; el.classList.remove('dragging'); document.querySelectorAll('.wg-cell.drop').forEach((c) => c.classList.remove('drop')); });
+  return el;
+}
+function gridBody(root, days) {
+  const goal = state.settings.dailyGoal;
+  let planned = 0, eaten = 0, unknown = 0;
+  days.forEach((d) => { const t = dayTotals(d); planned += t.planned; eaten += t.eaten; unknown += t.unknown; });
+  put(root, h('div', { class: 'card pad wk-bar' },
+    h('span', null, 'Planned this week ', h('b', { id: 'week-total' }, `${fmt(planned)} kcal`)),
+    h('span', null, 'Eaten this week ', h('b', { id: 'week-eaten' }, `${fmt(eaten)} kcal`))));
+  if (unknown) put(root, h('p', { class: 'note-line', id: 'unknown-note' }, `${unknown} ${unknown === 1 ? 'item' : 'items'} without calories (counted as 0)`));
+  const grid = h('div', { class: 'wk-grid', role: 'group', 'aria-label': 'Week plan' });
+  grid.append(h('div', { class: 'wg-corner' }));
+  for (const d of days) {
+    const t = dayTotals(d), long = fmtDate(d, { weekday: 'long', month: 'long', day: 'numeric' });
+    grid.append(h('button', { class: 'wg-head' + (d === today() ? ' today' : ''), type: 'button', 'data-date': d, 'aria-label': `Open ${long} in Day view`,
+      onClick: () => { ui.day = d; ui.wideView = 'day'; saveUi(); render(); window.scrollTo(0, 0); } },
+      h('b', null, fmtDate(d, { weekday: 'short' })), h('span', { class: 'dn' }, String(parseYmd(d).getDate())),
+      h('span', { class: 'tt' + (goal && t.planned > goal ? ' over' : ''), 'data-total': String(Math.round(t.planned)) },
+        goal ? `${fmt(t.planned)} / ${fmt(goal)} kcal` : `${fmt(t.planned)} kcal`)));
+  }
+  for (const [slot, label] of SLOTS) {
+    let rowSum = 0;
+    days.forEach((d) => entriesOf(d, slot).forEach((e) => { rowSum += entryInfo(e).cal; }));
+    grid.append(h('div', { class: 'wg-rowh', 'data-slot': slot }, h('b', null, label), h('span', null, `${fmt(rowSum)} kcal`)));
+    for (const d of days) {
+      const list = sortedEntries(d, slot);
+      const addLabel = `Add to ${label} on ${fmtDate(d, { weekday: 'long' })}`;
+      const cell = h('div', { class: 'wg-cell', 'data-slot': slot, 'data-date': d, role: 'group', 'aria-label': `${label}, ${fmtDate(d, { weekday: 'long' })}` },
+        list.map((e) => gridEntry(e, d, slot)),
+        h('button', { class: 'gc-add', type: 'button', 'aria-label': addLabel, onClick: () => entrySheet({ date: d, slot }) }, '+ Add'));
+      cell.addEventListener('dragover', (ev) => {
+        if (!dragInfo) return; ev.preventDefault(); ev.dataTransfer.dropEffect = ev.altKey ? 'copy' : 'move'; cell.classList.add('drop');
+      });
+      cell.addEventListener('dragleave', (ev) => { if (!cell.contains(ev.relatedTarget)) cell.classList.remove('drop'); });
+      cell.addEventListener('drop', (ev) => {
+        if (!dragInfo) return; ev.preventDefault(); cell.classList.remove('drop');
+        const from = dragInfo; dragInfo = null;
+        moveOrCopyEntry(from, { date: d, slot }, ev.altKey);
+      });
+      grid.append(cell);
+    }
+  }
+  put(root, grid, h('p', { class: 'hint' }, 'Drag an entry to another day or meal to move it; hold Alt (Option) while dropping to copy.'));
 }
 
 function planMenu() {
@@ -1034,7 +1123,7 @@ function pickPane(kind, getSel, onPick) {
 }
 
 /* add / edit an entry in a slot: Meals | Foods | Custom */
-function entrySheet({ date, slot, entry }) {
+function entrySheet({ date, slot, entry, removable }) {
   const editing = !!entry;
   const ek = entry ? entryKind(entry) : null;
   let mode = editing ? (ek === 'custom' ? 'custom' : ek === 'meal' ? 'meals' : 'foods') : (ui.pickMode === 'foods' ? 'foods' : 'meals');
@@ -1100,7 +1189,8 @@ function entrySheet({ date, slot, entry }) {
   };
   const api = openSheet(editing ? 'Edit entry' : `Add to ${SLOT_LABEL[slot]} · ${fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric' })}`,
     [seg, panes, h('div', { class: 'field' }, h('span', null, mode === 'meals' ? 'Amount (servings of the whole meal)' : 'Amount (servings)'), step.el), preview, field('Time (optional)', timeIn), err],
-    h('button', { class: 'btn', type: 'button', onClick: save_ }, editing ? 'Save' : 'Add'));
+    [editing && removable ? h('button', { class: 'btn danger', type: 'button', onClick: () => { const nm = entryInfo(entry).name; api.close(); removeEntry(date, slot, entry, nm); } }, 'Remove') : null,
+     h('button', { class: 'btn', type: 'button', onClick: save_ }, editing ? 'Save' : 'Add')]);
 }
 
 /* meal or food -> pick week (this / next / calendar), day, slot, amount */
@@ -1178,7 +1268,7 @@ function viewMenu() {
       ? emptyState('No meals yet', 'Tap + to combine foods you often eat together, like toast and an apple.')
       : emptyState('No foods yet', 'Tap + to add your first food, or add your starter foods in Settings.'));
     if (!arr.length) return list.replaceChildren(emptyState(ui.menuCan && !needle ? `No ${isMeals ? 'meals' : 'foods'} you can make right now` : 'No matches', ui.menuCan ? 'Check the Shopping tab for what you are out of.' : 'Try a different search.'));
-    list.replaceChildren(h('div', { class: 'card' }, arr.map(isMeals ? mealRow : foodRow)));
+    list.replaceChildren(h('div', { class: 'card menu-grid' }, arr.map(isMeals ? mealRow : foodRow)));
   };
   const chip = h('button', { class: 'chip', type: 'button', 'aria-pressed': String(ui.menuCan), onClick: () => { ui.menuCan = !ui.menuCan; chip.setAttribute('aria-pressed', String(ui.menuCan)); draw(); } }, 'Can make now');
   put(root, storageBanner(),
@@ -1853,6 +1943,7 @@ const views = { plan: viewPlan, menu: viewMenu, pantry: viewPantry, shopping: vi
 function render() {
   const view = document.getElementById('view');
   view.replaceChildren(views[ui.tab]());
+  view.classList.toggle('wide-week', ui.tab === 'plan' && isWide() && planViewNow() === 'week');
   document.querySelectorAll('#tabbar button').forEach((b) => {
     if (b.dataset.tab === ui.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
@@ -1860,6 +1951,7 @@ function render() {
   badge.hidden = n === 0; badge.textContent = n > 99 ? '99+' : String(n);
   document.querySelector('#tabbar [data-tab="shopping"]').setAttribute('aria-label', n ? `Shopping, ${n} to buy` : 'Shopping');
 }
+if (WIDE_MQ.addEventListener) WIDE_MQ.addEventListener('change', () => render());
 document.getElementById('tabbar').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-tab]'); if (!b) return;
   if (ui.tab !== b.dataset.tab) { ui.tab = b.dataset.tab; render(); window.scrollTo(0, 0); }
