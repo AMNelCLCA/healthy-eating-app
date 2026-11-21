@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.3.3-laptop';
+const VERSION = '1.3.4-laptop';
 const KEY = 'healthyEating.v1'; // storage key is unchanged so existing data is found and migrated in place
 const SCHEMA = 3;
 const SLOTS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snack', 'Snack']];
