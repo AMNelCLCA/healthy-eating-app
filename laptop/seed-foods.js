@@ -699,3 +699,27 @@ window.SEED_SMOOTHIE_V3 = {
     { name: "Milk (2%)", amount: "¼ cup", calories: 31, pantry: "Milk" }
   ]
 };
+
+/* Future additions go here as batches. Each batch is merged once per device (settings.appliedBatches),
+   adding pantry items and foods whose names aren't there yet. */
+window.SEED_BATCHES = [
+  { id: "2026-11-21-scampi-salad",
+    pantry: [ { name: "Croutons", category: "Pantry" } ],
+    foods: [
+      { name: "Shrimp scampi salad", serving: "1 salad", estimate: true, emoji: "🥗",
+        notes: "Scampi shrimp (cooked like the shrimp scampi, no pasta) on lettuce, spinach and carrots with croutons. No dressing counted; add it separately if you use one.",
+        pantry: ["Shrimp", "Butter", "Olive oil", "Garlic", "White wine", "Lemons", "Lettuce", "Spinach", "Carrots", "Croutons"],
+        components: [
+          { name: "Shrimp (raw weight)", amount: "4 oz", calories: 97, pantry: "Shrimp" },
+          { name: "Butter", amount: "½ tbsp", calories: 51, pantry: "Butter" },
+          { name: "Olive oil (pan)", amount: "¾ tsp", calories: 30, pantry: "Olive oil" },
+          { name: "Garlic", amount: "1 clove", calories: 5, pantry: "Garlic" },
+          { name: "White wine", amount: "about 1.5 tbsp", calories: 17, pantry: "White wine" },
+          { name: "Lemon juice", amount: "1 tsp", calories: 1, pantry: "Lemons" },
+          { name: "Lettuce", amount: "2 cups", calories: 10, pantry: "Lettuce" },
+          { name: "Spinach", amount: "1 cup", calories: 7, pantry: "Spinach" },
+          { name: "Carrots", amount: "1 medium, shredded", calories: 25, pantry: "Carrots" },
+          { name: "Croutons", amount: "½ cup", calories: 65, pantry: "Croutons" }
+        ] }
+    ] }
+];
