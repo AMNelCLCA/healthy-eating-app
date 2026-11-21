@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.3.0-laptop';
+const VERSION = '1.3.1-laptop';
 const KEY = 'healthyEating.v1'; // storage key is unchanged so existing data is found and migrated in place
 const SCHEMA = 3;
 const SLOTS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snack', 'Snack']];
@@ -207,7 +207,7 @@ async function photoFromFile(file) {
 const fmtBytes = (n) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
 /* ---------- state, migration & storage ---------- */
-const blank = () => ({ schemaVersion: SCHEMA, pantry: [], foods: [], meals: [], weeks: {}, settings: { dailyGoal: null, seededFoodsV1: false, seededMealsV1: false } });
+const blank = () => ({ schemaVersion: SCHEMA, pantry: [], foods: [], meals: [], weeks: {}, settings: { dailyGoal: null, seededFoodsV1: false, seededMealsV1: false, seededRecipesV2: false } });
 let state = blank();
 let storageOk = true;
 let storageNote = '';
@@ -354,6 +354,7 @@ function normalize(raw) {
   out.settings.dailyGoal = st.dailyGoal != null && Number.isFinite(g) && g > 0 ? g : null;
   out.settings.seededFoodsV1 = st.seededFoodsV1 === true;
   out.settings.seededMealsV1 = st.seededMealsV1 === true;
+  out.settings.seededRecipesV2 = st.seededRecipesV2 === true;
   return out;
 }
 
@@ -592,8 +593,7 @@ function copyLastWeek(target) {
 }
 
 /* ---------- starter foods ---------- */
-function mergeSeed() {
-  const S = window.SEED_FOODS;
+function mergeSeed(S = window.SEED_FOODS) {
   const res = { pantry: 0, foods: 0 };
   if (!S) return res;
   for (const p of S.pantry || []) {
@@ -609,7 +609,7 @@ function mergeSeed() {
     state.foods.push({ id: uid(), name: f.name, serving: f.serving || '1 serving',
       calories: total != null ? total : (isNum(f.calories) ? f.calories : null),
       estimate: f.estimate === true, notes: f.notes || '', components,
-      pantryIds: [...new Set((f.pantry || []).map(pid).filter(Boolean))], picture: { type: 'emoji', value: autoEmoji(f.name) } });
+      pantryIds: [...new Set((f.pantry || []).map(pid).filter(Boolean))], picture: { type: 'emoji', value: f.emoji || autoEmoji(f.name) } });
     res.foods++;
   }
   return res;
@@ -1873,8 +1873,9 @@ function backupNote() {
     : `Backups include photos too (each adds roughly 30 to 40 KB). Without photos a backup is about ${fmtBytes(bytes)}.`;
 }
 function addStarter() {
-  const r = mergeSeed(), m = mergeMeals();
-  state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true;
+  const r = mergeSeed(), m = mergeMeals(), r2 = mergeSeed(window.SEED_RECIPES_V2);
+  r.foods += r2.foods; r.pantry += r2.pantry;
+  state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; state.settings.seededRecipesV2 = true;
   commit();
   if (!r.foods && !r.pantry && !m.meals) toast('Everything is already here');
   else toast(`Added ${r.foods} ${r.foods === 1 ? 'food' : 'foods'}, ${m.meals} ${m.meals === 1 ? 'meal' : 'meals'} and ${r.pantry} pantry ${r.pantry === 1 ? 'item' : 'items'}`);
@@ -1884,7 +1885,7 @@ async function eraseAll() {
     message: 'This permanently deletes your pantry, foods, meals, photos, plans and settings from this device. Export a backup first if you might want it back.' });
   if (!ok) return;
   await photoClearAll();
-  state = blank(); state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; // do not re-add starter foods on next launch
+  state = blank(); state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; state.settings.seededRecipesV2 = true; // do not re-add starter foods on next launch
   ui.menuQ = ''; ui.pantryQ = ''; ui.menuCan = false; commit(); toast('All data erased');
 }
 
@@ -1925,7 +1926,7 @@ async function importFile(input) {
   const ok = await confirmSheet({ title: 'Replace all data?', confirmLabel: 'Replace', danger: true,
     message: `This backup has ${parsed.pantry.length} pantry items, ${parsed.foods.length} foods, ${parsed.meals.length} meals, ${Object.keys(photosIn).length} photos and ${entries} planned entries. Importing replaces everything currently in the app.` });
   if (!ok) return;
-  parsed.settings.seededFoodsV1 = true; parsed.settings.seededMealsV1 = true; // an imported backup is what the user wants; do not merge starter foods on top
+  parsed.settings.seededFoodsV1 = true; parsed.settings.seededMealsV1 = true; parsed.settings.seededRecipesV2 = true; // an imported backup is what the user wants; do not merge starter foods on top
   await photoClearAll();
   let lost = 0;
   for (const it of [...parsed.foods, ...parsed.meals]) {
@@ -1963,11 +1964,14 @@ load();
 let seeded = null, seededMeals = 0;
 if (!state.settings.seededFoodsV1) { seeded = mergeSeed(); state.settings.seededFoodsV1 = true; }
 if (!state.settings.seededMealsV1) { seededMeals = mergeMeals().meals; state.settings.seededMealsV1 = true; }
-if (seeded || seededMeals) save();
+let seededRecipes = null;
+if (!state.settings.seededRecipesV2) { seededRecipes = mergeSeed(window.SEED_RECIPES_V2); state.settings.seededRecipesV2 = true; }
+if (seeded || seededMeals || seededRecipes) save();
 render();
 if (seeded && seeded.foods) toast(`Added ${seeded.foods} of your foods${seededMeals ? ` and ${seededMeals} meals` : ''}`);
 else if (seeded && seeded.pantry) toast(`Added ${seeded.pantry} pantry items`);
 else if (seededMeals) toast(`Added ${seededMeals} starter ${seededMeals === 1 ? 'meal' : 'meals'}`);
+else if (seededRecipes && seededRecipes.foods) toast(`Added ${seededRecipes.foods} new foods`);
 loadPhotos().catch(() => { /* photos are optional */ });
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* offline support is optional */ }); });

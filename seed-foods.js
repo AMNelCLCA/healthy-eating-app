@@ -624,3 +624,64 @@ window.SEED_MEALS = [
    { "food": "Minute rice with butter spread & salt", "servings": 1 },
    { "food": "Milk (2%)", "servings": 1 } ] }
 ];
+
+/* Recipes added 2026-11-21 (merged once via settings.seededRecipesV2, and from Settings → Add my starter foods). */
+window.SEED_RECIPES_V2 = {
+  pantry: [
+    { name: "Sriracha", category: "Pantry" },
+    { name: "Kewpie mayo", category: "Pantry" },
+    { name: "Nori sheets", category: "Pantry" },
+    { name: "Nori Komi furikake", category: "Pantry" },
+    { name: "Seasoned rice vinegar", category: "Pantry" },
+    { name: "Sesame seeds", category: "Pantry" },
+    { name: "Sesame oil", category: "Pantry" },
+    { name: "Red pepper flakes", category: "Pantry" },
+    { name: "Black pepper", category: "Pantry" },
+    { name: "White wine", category: "Drinks" },
+    { name: "Lemons", category: "Produce" },
+    { name: "Costco chicken noodle soup", category: "Refrigerated" },
+    { name: "Costco double chocolate muffins", category: "Bakery" }
+  ],
+  foods: [
+    { name: "Chicken noodle soup (Costco)", serving: "1 cup (240 g)", calories: 120, emoji: "🍜",
+      notes: "Kirkland Signature deli soup; the 4.15 lb tub is about 8 cups.", pantry: ["Costco chicken noodle soup"] },
+    { name: "Double chocolate muffin (Costco)", serving: "1 muffin", calories: 689,
+      notes: "Kirkland Signature double chocolate muffin (5.8 oz). Half a muffin = plan 1/2 serving.", pantry: ["Costco double chocolate muffins"] },
+    { name: "Sushi rice (homemade, seasoned)", serving: "1 cup cooked", estimate: true,
+      notes: "Full batch: 1.5 cups uncooked sushi rice + 1.5 cups water, 3 tbsp seasoned rice vinegar, 1.5 tbsp sugar, 3/4 tsp salt, 3/4 tbsp toasted sesame seeds, 3/4 tbsp sesame oil, 1-2 tsp Nori Komi furikake. About 1,357 kcal per batch, makes about 4 cups. Amounts below are one quarter of the batch.",
+      pantry: ["Sushi rice", "Seasoned rice vinegar", "Sugar", "Salt", "Sesame seeds", "Sesame oil", "Nori Komi furikake"],
+      components: [
+        { name: "Sushi rice (uncooked)", amount: "3/8 cup", calories: 269, pantry: "Sushi rice" },
+        { name: "Seasoned rice vinegar", amount: "3/4 tbsp", calories: 19, pantry: "Seasoned rice vinegar" },
+        { name: "Sugar", amount: "about 1 tsp", calories: 18, pantry: "Sugar" },
+        { name: "Salt", amount: "pinch", calories: 0, pantry: "Salt" },
+        { name: "Toasted sesame seeds", amount: "about 1/2 tsp", calories: 10, pantry: "Sesame seeds" },
+        { name: "Sesame oil", amount: "about 1/2 tsp", calories: 23, pantry: "Sesame oil" },
+        { name: "Nori Komi furikake", amount: "about 1/2 tsp", calories: 2, pantry: "Nori Komi furikake" }
+      ] },
+    { name: "Crab sushi (homemade)", serving: "1 serving (1 cup rice)", estimate: true,
+      notes: "Shop: China Town Supermarket, State Street (33rd). Change the amounts if your portions differ.",
+      pantry: ["Sushi rice", "Imitation crab", "Kewpie mayo", "Sriracha", "Avocados", "Nori sheets"],
+      components: [
+        { name: "Sushi rice (homemade, seasoned)", amount: "1 cup", calories: 341, pantry: "Sushi rice" },
+        { name: "Imitation crab", amount: "3 oz", calories: 81, pantry: "Imitation crab" },
+        { name: "Kewpie mayo", amount: "1 tbsp", calories: 110, pantry: "Kewpie mayo" },
+        { name: "Sriracha", amount: "1 tsp", calories: 5, pantry: "Sriracha" },
+        { name: "Avocado", amount: "1/2 avocado", calories: 120, pantry: "Avocados" },
+        { name: "Roasted seaweed nori", amount: "1 sheet", calories: 10, pantry: "Nori sheets" }
+      ] },
+    { name: "Shrimp scampi", serving: "1/4 of the batch", estimate: true,
+      notes: "Assumes a batch of 8 oz pasta + 1 lb shrimp, 1 tbsp olive oil for the pan + 1 tsp on the noodles, 2 tbsp butter, 4 garlic cloves, 1/3 cup white wine, 1 tbsp lemon juice: about 1,640 kcal for the batch. If you eat half the batch, plan it as 2 servings.",
+      pantry: ["Barilla pasta", "Shrimp", "Olive oil", "Butter", "Garlic", "White wine", "Lemons", "Red pepper flakes", "Salt", "Black pepper"],
+      components: [
+        { name: "Barilla pasta (dry)", amount: "2 oz", calories: 200, pantry: "Barilla pasta" },
+        { name: "Shrimp (raw weight)", amount: "4 oz", calories: 97, pantry: "Shrimp" },
+        { name: "Olive oil", amount: "1 tsp", calories: 40, pantry: "Olive oil" },
+        { name: "Butter", amount: "1/2 tbsp", calories: 51, pantry: "Butter" },
+        { name: "Garlic", amount: "1 clove", calories: 5, pantry: "Garlic" },
+        { name: "White wine", amount: "about 1.5 tbsp", calories: 17, pantry: "White wine" },
+        { name: "Lemon juice", amount: "1 tsp", calories: 1, pantry: "Lemons" },
+        { name: "Salt, pepper, red pepper flakes", amount: "to taste", calories: 0 }
+      ] }
+  ]
+};
