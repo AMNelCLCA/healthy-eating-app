@@ -3,7 +3,7 @@
 (() => {
 'use strict';
 
-const VERSION = '1.2.3';
+const VERSION = '1.2.4';
 const KEY = 'healthyEating.v1'; // storage key is unchanged so existing data is found and migrated in place
 const SCHEMA = 3;
 const SLOTS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['dinner', 'Dinner'], ['snack', 'Snack']];
@@ -207,7 +207,7 @@ async function photoFromFile(file) {
 const fmtBytes = (n) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
 /* ---------- state, migration & storage ---------- */
-const blank = () => ({ schemaVersion: SCHEMA, pantry: [], foods: [], meals: [], weeks: {}, settings: { dailyGoal: null, seededFoodsV1: false, seededMealsV1: false, seededRecipesV2: false, smoothieV3: false } });
+const blank = () => ({ schemaVersion: SCHEMA, pantry: [], foods: [], meals: [], weeks: {}, settings: { dailyGoal: null, seededFoodsV1: false, seededMealsV1: false, seededRecipesV2: false, smoothieV3: false, appliedBatches: [] } });
 let state = blank();
 let storageOk = true;
 let storageNote = '';
@@ -356,6 +356,7 @@ function normalize(raw) {
   out.settings.seededMealsV1 = st.seededMealsV1 === true;
   out.settings.seededRecipesV2 = st.seededRecipesV2 === true;
   out.settings.smoothieV3 = st.smoothieV3 === true;
+  out.settings.appliedBatches = Array.isArray(st.appliedBatches) ? st.appliedBatches.filter((x) => typeof x === 'string') : [];
   return out;
 }
 
@@ -625,6 +626,19 @@ function applyFoodUpdate(F) {
   if (existing) Object.assign(existing, fields);
   else state.foods.push({ id: uid(), name: F.name, ...fields, picture: { type: 'emoji', value: F.emoji || autoEmoji(F.name) } });
   return true;
+}
+
+const allBatchIds = () => (window.SEED_BATCHES || []).map((b) => b.id);
+/* merge every batch this device hasn't had yet (or all of them with force) */
+function applyBatches(force) {
+  const res = { pantry: 0, foods: 0 };
+  const done = new Set(state.settings.appliedBatches || []);
+  for (const b of window.SEED_BATCHES || []) {
+    if (!b || !b.id || (done.has(b.id) && !force)) continue;
+    const r = mergeSeed(b); res.pantry += r.pantry; res.foods += r.foods; done.add(b.id);
+  }
+  state.settings.appliedBatches = [...done];
+  return res;
 }
 
 /* starter meals (SEED_MEALS): matched by name, foods looked up by exact name, missing foods skipped */
@@ -1801,7 +1815,8 @@ function backupNote() {
 }
 function addStarter() {
   const r = mergeSeed(), m = mergeMeals(), r2 = mergeSeed(window.SEED_RECIPES_V2);
-  r.foods += r2.foods; r.pantry += r2.pantry;
+  const r3 = applyBatches(true);
+  r.foods += r2.foods + r3.foods; r.pantry += r2.pantry + r3.pantry;
   state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; state.settings.seededRecipesV2 = true;
   commit();
   if (!r.foods && !r.pantry && !m.meals) toast('Everything is already here');
@@ -1812,7 +1827,7 @@ async function eraseAll() {
     message: 'This permanently deletes your pantry, foods, meals, photos, plans and settings from this device. Export a backup first if you might want it back.' });
   if (!ok) return;
   await photoClearAll();
-  state = blank(); state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; state.settings.seededRecipesV2 = true; state.settings.smoothieV3 = true; // do not re-add starter foods on next launch
+  state = blank(); state.settings.seededFoodsV1 = true; state.settings.seededMealsV1 = true; state.settings.seededRecipesV2 = true; state.settings.smoothieV3 = true; state.settings.appliedBatches = allBatchIds(); // do not re-add starter foods on next launch
   ui.menuQ = ''; ui.pantryQ = ''; ui.menuCan = false; commit(); toast('All data erased');
 }
 
@@ -1853,7 +1868,7 @@ async function importFile(input) {
   const ok = await confirmSheet({ title: 'Replace all data?', confirmLabel: 'Replace', danger: true,
     message: `This backup has ${parsed.pantry.length} pantry items, ${parsed.foods.length} foods, ${parsed.meals.length} meals, ${Object.keys(photosIn).length} photos and ${entries} planned entries. Importing replaces everything currently in the app.` });
   if (!ok) return;
-  parsed.settings.seededFoodsV1 = true; parsed.settings.seededMealsV1 = true; parsed.settings.seededRecipesV2 = true; parsed.settings.smoothieV3 = true; // an imported backup is what the user wants; do not merge starter foods on top
+  parsed.settings.seededFoodsV1 = true; parsed.settings.seededMealsV1 = true; parsed.settings.seededRecipesV2 = true; parsed.settings.smoothieV3 = true; parsed.settings.appliedBatches = [...new Set([...(Array.isArray(parsed.settings.appliedBatches) ? parsed.settings.appliedBatches : []), ...allBatchIds()])]; // an imported backup is what the user wants; do not merge starter foods on top
   await photoClearAll();
   let lost = 0;
   for (const it of [...parsed.foods, ...parsed.meals]) {
@@ -1893,13 +1908,15 @@ let seededRecipes = null;
 if (!state.settings.seededRecipesV2) { seededRecipes = mergeSeed(window.SEED_RECIPES_V2); state.settings.seededRecipesV2 = true; }
 let smoothie = false;
 if (!state.settings.smoothieV3) { smoothie = applyFoodUpdate(window.SEED_SMOOTHIE_V3); state.settings.smoothieV3 = true; }
-if (seeded || seededMeals || seededRecipes || smoothie) save();
+const batches = applyBatches(false);
+if (seeded || seededMeals || seededRecipes || smoothie || batches.foods || batches.pantry) save();
 render();
 if (seeded && seeded.foods) toast(`Added ${seeded.foods} of your foods${seededMeals ? ` and ${seededMeals} meals` : ''}`);
 else if (seeded && seeded.pantry) toast(`Added ${seeded.pantry} pantry items`);
 else if (seededMeals) toast(`Added ${seededMeals} starter ${seededMeals === 1 ? 'meal' : 'meals'}`);
 else if (seededRecipes && seededRecipes.foods) toast(`Added ${seededRecipes.foods} new foods`);
 else if (smoothie) toast('Smoothie updated to your recipe');
+else if (batches.foods) toast(`Added ${batches.foods} new ${batches.foods === 1 ? 'food' : 'foods'}`);
 loadPhotos().catch(() => { /* photos are optional */ });
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* offline support is optional */ }); });
